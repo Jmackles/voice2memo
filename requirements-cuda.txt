@@ -1,0 +1,5 @@
+# NVIDIA only. Installed in addition to requirements.txt when nvidia-smi is present.
+# On Windows the cuBLAS and cuDNN DLL folders in site-packages must be on PATH
+# before faster-whisper imports; the launcher handles that.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9,<10
