@@ -57,7 +57,7 @@ There is a `voice2memos.cfg` file editable by hand or through the settings dialo
 In build order. Each step is meant to be runnable on its own before the next starts.
  
 - [X] Installer that checks and installs dependencies idempotently (I had to learn this word so you do too. )
-- [ ] Window shell with every control present and clickable
+- [X] Window shell with every control present and clickable
 - [ ] Config file, loader, and defaults
 - [ ] Settings dialog, applied without restart
 - [ ] Testing workbench: bench.py and fake backends
