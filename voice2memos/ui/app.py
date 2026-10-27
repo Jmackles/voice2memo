@@ -15,7 +15,7 @@ from tkinter import font as tkfont
 from tkinter import ttk
 
 from voice2memos import __version__
-from voice2memos.ui.panes import make_pane
+from voice2memos.ui.panes import KeyLog, make_pane
 from voice2memos.ui.platform import set_dpi_awareness
 
 log = logging.getLogger(__name__)
@@ -97,10 +97,19 @@ class App:
         root.title(f"voice2memos {__version__}")
         root.geometry("960x600")
         root.minsize(640, 400)
+        root.protocol("WM_DELETE_WINDOW", self.close)
         self._make_fonts_and_styles()
         self._build_banner()
         self._build_panes()
+        self.keylog = KeyLog(root)
+        self.keylog.watch(self.left.text, "transcript")
+        self.keylog.watch(self.right.text, "note")
         self.set_status("Ready")
+
+    def close(self) -> None:
+        """Write out any half-finished key log lines, then close. Step 9 adds the unsaved-changes prompt."""
+        self.keylog.flush_all()
+        self.root.destroy()
 
     def _make_fonts_and_styles(self) -> None:
         # Held on self: tkinter deletes a named font when its Font object is collected.
