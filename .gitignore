@@ -219,3 +219,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# voice2memos
+.venv/
+logs/
+memos/
+*.wav
+!tests/fixtures/**/*.wav
+*.cfg
+!voice2memos.example.cfg
+tests/fixtures-inbox/
+tests/vault/
