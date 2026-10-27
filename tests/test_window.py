@@ -1,15 +1,17 @@
-"""Window shell: every control is there, the stubs log their name, lock and status line work."""
+"""Window shell: every control is there, the stubs log their name, lock, status line, key log."""
 
 from __future__ import annotations
 
 import logging
+import re
+import time
 import tkinter as tk
 
 import pytest
 
 from voice2memos import __version__
 from voice2memos.ui.app import BANNER, ICONS, STATUS_COLORS, App
-from voice2memos.ui.panes import replace_text
+from voice2memos.ui.panes import KeyLog, describe_key, replace_text
 
 BANNER_NAMES = [name for name, _ in BANNER]
 
@@ -22,7 +24,14 @@ def app():
         pytest.skip(f"tkinter has no display: {e}")
     root.withdraw()
     yield App(root)
-    root.destroy()
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass  # the test closed the window itself
+
+
+def key_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == "voice2memos.keys"]
 
 
 def test_title_carries_the_version(app):
@@ -121,3 +130,131 @@ def test_clicking_the_status_lists_the_history(app):
     body = app.history_window.winfo_children()[0]
     lines = [label.cget("text").split("  ", 1)[1] for label in body.winfo_children()]
     assert lines == ["Ready", "one", "two"]
+
+
+@pytest.mark.parametrize(
+    "keysym, char, state, logged",
+    [
+        ("a", "a", 0, "a"),
+        ("A", "A", 0x1, "A"),
+        ("space", " ", 0, " "),
+        ("BackSpace", "\x08", 0, "⌫"),
+        ("Return", "\r", 0, "⏎"),
+        ("Left", "", 0, "←"),
+        ("z", "\x1a", 0x4, "[Ctrl+Z]"),
+        ("S", "\x13", 0x5, "[Ctrl+S]"),
+        ("BackSpace", "\x7f", 0x4, "[Ctrl+⌫]"),
+        ("at", "@", 0x20004, "@"),  # AltGr on Windows holds Control too
+        ("F5", "", 0, "[F5]"),
+        ("Shift_L", "", 0, ""),
+        ("Control_L", "", 0x4, ""),
+    ],
+)
+def test_describe_key(keysym, char, state, logged):
+    assert describe_key(keysym, char, state) == logged
+
+
+def test_key_log_holds_a_burst_until_flushed(app, caplog):
+    keys = KeyLog(app.root)
+    with caplog.at_level(logging.INFO):
+        for key in "hi there":
+            keys.record("note", key)
+        assert key_lines(caplog) == []
+        keys.flush("note")
+    [line] = key_lines(caplog)
+    assert re.fullmatch(r'note, \d+\.\ds: "hi there"', line)
+
+
+def typed(caplog) -> list[str]:
+    """Just the quoted keys from each burst line."""
+    return [line.split(": ", 1)[1] for line in key_lines(caplog)]
+
+
+def pending_timers(app) -> tuple[str, ...]:
+    return app.root.tk.splitlist(app.root.tk.call("after", "info"))
+
+
+def wait_for_key_lines(app, caplog) -> None:
+    deadline = time.monotonic() + 2
+    while not key_lines(caplog) and time.monotonic() < deadline:
+        app.root.update()
+        time.sleep(0.01)
+
+
+def test_key_log_breaks_the_line_at_max_chars(app, caplog):
+    keys = KeyLog(app.root, max_chars=5)
+    with caplog.at_level(logging.INFO):
+        for key in "abcdefgh":
+            keys.record("note", key)
+        keys.flush_all()
+    assert typed(caplog) == ['"abcde"', '"fgh"']
+    assert pending_timers(app) == ()
+
+
+def test_enter_ends_the_line(app, caplog):
+    keys = KeyLog(app.root)
+    with caplog.at_level(logging.INFO):
+        for key in ["h", "i", describe_key("Return", "\r", 0), "x"]:
+            keys.record("note", key)
+        keys.flush_all()
+    assert typed(caplog) == ['"hi⏎"', '"x"']
+
+
+def test_key_log_posts_after_a_pause(app, caplog):
+    keys = KeyLog(app.root, idle_seconds=0.05)
+    with caplog.at_level(logging.INFO):
+        keys.record("note", "a")
+        wait_for_key_lines(app, caplog)
+    assert typed(caplog) == ['"a"']
+    assert keys.bursts == {}
+    assert pending_timers(app) == ()
+
+
+def test_each_key_restarts_the_pause(app):
+    keys = KeyLog(app.root)
+    keys.record("note", "a")
+    first = keys.bursts["note"].idle
+    keys.record("note", "b")
+    assert keys.bursts["note"].idle != first
+    assert first not in pending_timers(app)
+
+
+def test_key_log_breaks_the_line_after_max_seconds(app, caplog):
+    keys = KeyLog(app.root, max_seconds=0.05)
+    with caplog.at_level(logging.INFO):
+        keys.record("note", "a")
+        wait_for_key_lines(app, caplog)
+    assert typed(caplog) == ['"a"']
+    assert keys.bursts == {}
+
+
+def test_click_is_logged_after_any_unfinished_typing(app, caplog):
+    replace_text(app.right.text, "hello")
+    app.keylog.record("transcript", "t")
+    with caplog.at_level(logging.INFO):
+        app.right.text.event_generate("<Button-1>", x=1, y=1)
+    burst, click = key_lines(caplog)
+    assert burst.startswith("transcript, ") and burst.endswith('"t"')
+    assert click == "note: clicked at line 1, char 1"
+
+
+def test_key_log_keeps_fields_apart_and_skips_modifiers(app, caplog):
+    keys = KeyLog(app.root)
+    with caplog.at_level(logging.INFO):
+        keys.record("note", "")
+        assert keys.bursts == {}
+        keys.record("note", "n")
+        keys.record("transcript", "t")
+        keys.record("note", "o")
+        keys.flush_all()
+    assert {line.split(",")[0]: line.split(": ", 1)[1] for line in key_lines(caplog)} == {
+        "note": '"no"',
+        "transcript": '"t"',
+    }
+
+
+def test_closing_the_window_writes_out_the_last_burst(app, caplog):
+    app.keylog.record("note", "x")
+    with caplog.at_level(logging.INFO):
+        app.close()
+    assert typed(caplog) == ['"x"']
