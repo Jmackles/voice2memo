@@ -4,7 +4,7 @@ Honestly this is just a personal project. I enjoy the functionality of ObsidianM
 
 ## Status
 
-lol
+lol (pre-alpha)
 
 ## What it does
 
