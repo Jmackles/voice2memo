@@ -21,6 +21,10 @@ Every memo is its own note, so clicking a linked term in Obsidian shows every ti
  
 There is also a push-to-note mode: a second hotkey opens the window with an empty pane and the cursor ready, for memos you'd rather type.
 
+## Requirements I can't build into this thing
+
+You must obviously have obsidian installed in order to actually benefit from the markdown features. I mean I guess it should still technically work, but it's the apple watch to your samsung galaxy
+
 ## Install
  
 Planned: one script that checks what you already have, installs what's missing, and says which was which. Until that exists, the manual version on Windows is:
