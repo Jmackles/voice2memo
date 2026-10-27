@@ -1,4 +1,4 @@
-# Coppermind:voice2memos
+# voice2memos (aka Coppermind)
 
 Honestly this is just a personal project. I enjoy the functionality of ObsidianMD and like the idea of being able to quickly record and transcribe something on the fly. Being able to locally search my stream of consciousness and ideas sounded like such a cool concept. So this application is a slapped together `tkinter` interface that can either capture via push-to-talk/recording (utilizing `pynput`, `sounddevice` and `soundfile`) or loads an audio file, transcribes it locally via `faster-whisper`, displays the transcription for the user in a text pane, then passes that transcript to the `ollama` model gemma4 (possibly others like i said personal project here) to clean up garbage words like "um", and "so", and identifying important words/phrases/concepts and applying appropriate wikilink markdown to the text. The cleaned up note to be saved to the vault is then displayed on the right hand text pane. The user can edit either field and save the file to their obsidian vault. 
 
