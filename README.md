@@ -59,7 +59,7 @@ In build order. Each step is meant to be runnable on its own before the next sta
 - [X] Installer that checks and installs dependencies idempotently (I had to learn this word so you do too. )
 - [X] Window shell with every control present and clickable
 - [ ] Config file, loader, and defaults
-- [ ] Settings dialog, applied without restart
+- [X] Settings dialog, applied without restart
 - [ ] Testing workbench: bench.py and fake backends
 - [ ] Buttons wired and tested against fakes
 - [ ] Whisper wrapper, tested from the bench
