@@ -1,7 +1,8 @@
 """Root window, banner, panes, worker wiring.
 
 Build-order step 2: every control is present and clickable. The banner buttons
-are stubs that log their own name until step 6 makes them do what they say.
+are stubs that log their own name until step 6 makes them do what they say,
+except Settings, which opens the real dialog.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from tkinter import ttk
 from voice2memos import __version__
 from voice2memos.ui.panes import KeyLog, make_pane
 from voice2memos.ui.platform import set_dpi_awareness
+from voice2memos.ui.settings import Field, SettingsDialog, describe_changes
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +93,8 @@ class App:
         self.status_history: deque[tuple[datetime, str, str]] = deque(maxlen=10)
         self.retry_callback: Callable[[], None] | None = None
         self.history_window: tk.Toplevel | None = None
+        self.settings_dialog: SettingsDialog | None = None
+        self.settings_values: dict[Field, str] = {}  # in memory until step 3 adds the .cfg
         self.buttons: dict[str, ttk.Button] = {}
         self.tooltips: dict[str, Tooltip] = {}
 
@@ -232,6 +236,22 @@ class App:
             self.tooltips["paint"].text = "Type mode: edit the note as text"
         log.info("note pane in %s mode", "paint" if self.paint_mode else "type")
 
+    # --- settings --------------------------------------------------------
+
+    def open_settings(self) -> None:
+        if self.settings_dialog is not None and self.settings_dialog.window.winfo_exists():
+            self.settings_dialog.window.lift()
+            return
+        self.settings_dialog = SettingsDialog(self.root, self.settings_values, self.keylog, self.apply_settings)
+
+    def apply_settings(self, values: dict[Field, str]) -> None:
+        """Log what changed, secrets by name only. Step 3 writes the values to the .cfg."""
+        changes = describe_changes(self.settings_values, values)
+        for line in changes:
+            log.info("setting %s", line)
+        self.settings_values = values
+        self.set_status("Settings saved" if changes else "Settings saved, nothing changed")
+
     # --- banner stubs, wired up in step 6 --------------------------------
 
     def open_file(self) -> None:
@@ -251,9 +271,6 @@ class App:
 
     def choose_vault(self) -> None:
         log.info("stub: choose_vault")
-
-    def open_settings(self) -> None:
-        log.info("stub: open_settings")
 
     def open_log(self) -> None:
         log.info("stub: open_log")

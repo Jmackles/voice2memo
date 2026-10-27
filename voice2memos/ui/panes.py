@@ -105,8 +105,8 @@ class KeyLog:
     A burst ends on Enter, after ``idle_seconds`` with no key, at ``max_chars``,
     ``max_seconds`` after its first key, or when focus leaves the field. A click
     in a field ends every burst and is logged as its own line. Keys pressed while
-    a field is disabled change nothing and aren't logged. Never watch a field
-    that holds a secret, like an API key: everything here ends up in the log file.
+    a field is disabled change nothing and aren't logged. Everything here ends up
+    in the log file, so a masked field, like an API key, is refused outright.
     """
 
     def __init__(
@@ -118,15 +118,22 @@ class KeyLog:
         self.idle_seconds = idle_seconds
         self.bursts: dict[str, _Burst] = {}
 
-    def watch(self, widget: tk.Text, name: str) -> None:
+    def watch(self, widget: tk.Text | ttk.Entry, name: str) -> None:
+        if "show" in widget.keys() and widget.cget("show"):
+            raise ValueError(f"{name} is a masked field; the key log never watches a secret")
+
         def on_key(event: tk.Event) -> None:
             if str(widget.cget("state")) != "disabled":
                 self.record(name, describe_key(event.keysym, event.char, event.state))
 
         def on_click(event: tk.Event) -> None:
             self.flush_all()  # first, so the log stays in the order things happened
-            line, char = widget.index(f"@{event.x},{event.y}").split(".")
-            keylog.info("%s: clicked at line %s, char %d", name, line, int(char) + 1)
+            if isinstance(widget, tk.Text):
+                line, char = widget.index(f"@{event.x},{event.y}").split(".")
+                where = f"line {line}, char {int(char) + 1}"
+            else:
+                where = f"char {widget.index(f'@{event.x}') + 1}"
+            keylog.info("%s: clicked at %s", name, where)
 
         widget.bind("<KeyPress>", on_key, add="+")
         widget.bind("<Button-1>", on_click, add="+")

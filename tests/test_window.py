@@ -5,29 +5,16 @@ from __future__ import annotations
 import logging
 import re
 import time
-import tkinter as tk
+from tkinter import ttk
 
 import pytest
 
 from voice2memos import __version__
-from voice2memos.ui.app import BANNER, ICONS, STATUS_COLORS, App
+from voice2memos.ui.app import BANNER, ICONS, STATUS_COLORS
 from voice2memos.ui.panes import KeyLog, describe_key, replace_text
 
 BANNER_NAMES = [name for name, _ in BANNER]
-
-
-@pytest.fixture
-def app():
-    try:
-        root = tk.Tk()
-    except tk.TclError as e:
-        pytest.skip(f"tkinter has no display: {e}")
-    root.withdraw()
-    yield App(root)
-    try:
-        root.destroy()
-    except tk.TclError:
-        pass  # the test closed the window itself
+STUB_NAMES = [name for name in BANNER_NAMES if name != "open_settings"]
 
 
 def key_lines(caplog) -> list[str]:
@@ -51,7 +38,7 @@ def test_banner_buttons_in_order_with_tooltips(app):
     ]
 
 
-@pytest.mark.parametrize("name", BANNER_NAMES)
+@pytest.mark.parametrize("name", STUB_NAMES)
 def test_banner_stub_logs_its_name(app, caplog, name):
     with caplog.at_level(logging.INFO):
         app.buttons[name].invoke()
@@ -258,3 +245,8 @@ def test_closing_the_window_writes_out_the_last_burst(app, caplog):
     with caplog.at_level(logging.INFO):
         app.close()
     assert typed(caplog) == ['"x"']
+
+
+def test_key_log_refuses_a_masked_field(app):
+    with pytest.raises(ValueError, match="masked"):
+        KeyLog(app.root).watch(ttk.Entry(app.root, show="•"), "api key")
