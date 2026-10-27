@@ -2,23 +2,27 @@
 
 Build-order step 2: every control is present and clickable. The banner buttons
 are stubs that log their own name until step 6 makes them do what they say,
-except Settings, which opens the real dialog.
+except Settings, which opens the real dialog. The window's size and the split
+between the panes come from the config and go back to it on close.
 """
 
 from __future__ import annotations
 
+import configparser
 import logging
 import tkinter as tk
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from tkinter import font as tkfont
 from tkinter import ttk
 
-from voice2memos import __version__
+from voice2memos import __version__, config
+from voice2memos.config import Field
 from voice2memos.ui.panes import KeyLog, make_pane
 from voice2memos.ui.platform import set_dpi_awareness
-from voice2memos.ui.settings import Field, SettingsDialog, describe_changes
+from voice2memos.ui.settings import SettingsDialog, describe_changes
 
 log = logging.getLogger(__name__)
 
@@ -86,20 +90,21 @@ class Tooltip:
 
 
 class App:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, config_path: Path) -> None:
         self.root = root
+        self.config_path = config_path
+        self.config, config_warnings = config.load(config_path)
         self.left_locked = True
         self.paint_mode = True
         self.status_history: deque[tuple[datetime, str, str]] = deque(maxlen=10)
         self.retry_callback: Callable[[], None] | None = None
         self.history_window: tk.Toplevel | None = None
         self.settings_dialog: SettingsDialog | None = None
-        self.settings_values: dict[Field, str] = {}  # in memory until step 3 adds the .cfg
         self.buttons: dict[str, ttk.Button] = {}
         self.tooltips: dict[str, Tooltip] = {}
 
         root.title(f"voice2memos {__version__}")
-        root.geometry("960x600")
+        root.geometry(self.config["window"]["geometry"])
         root.minsize(640, 400)
         root.protocol("WM_DELETE_WINDOW", self.close)
         self._make_fonts_and_styles()
@@ -108,12 +113,42 @@ class App:
         self.keylog = KeyLog(root)
         self.keylog.watch(self.left.text, "transcript")
         self.keylog.watch(self.right.text, "note")
-        self.set_status("Ready")
+        sash = self.config["window"]["sash"]
+        self.sash_to_restore = int(sash) if sash else None
+        self.panes.bind("<Configure>", self._restore_sash, add="+")
+        for warning in config_warnings:
+            self.set_status(warning, "warning")
+        if not config_warnings:
+            self.set_status("Ready")
+
+    def _restore_sash(self, event: tk.Event) -> None:
+        # Once, on the first resize with a real width: as the window appears.
+        # Any earlier and the panes are 1px wide, so the sash lands at 0.
+        if self.sash_to_restore is not None and event.width > 1:
+            self.panes.sashpos(0, self.sash_to_restore)
+            self.sash_to_restore = None
 
     def close(self) -> None:
-        """Write out any half-finished key log lines, then close. Step 9 adds the unsaved-changes prompt."""
+        """Write out any half-finished key log lines, remember the window, then close.
+
+        Step 9 adds the unsaved-changes prompt.
+        """
         self.keylog.flush_all()
+        self._remember_window()
         self.root.destroy()
+
+    def _remember_window(self) -> None:
+        if not self.root.winfo_ismapped():
+            return  # a hidden window has no size worth keeping
+        window = {("window", "sash"): str(self.panes.sashpos(0))}
+        if self.root.state() != "zoomed":  # keep the normal size, not the maximized one
+            window[("window", "geometry")] = f"{self.root.winfo_width()}x{self.root.winfo_height()}"
+        if all(self.config[section][key] == value for (section, key), value in window.items()):
+            return
+        try:
+            self.config, _ = config.update_file(self.config_path, window)
+        except (OSError, UnicodeDecodeError, configparser.Error) as e:
+            log.warning("window size not saved: %s", config.describe_error(e))
 
     def _make_fonts_and_styles(self) -> None:
         # Held on self: tkinter deletes a named font when its Font object is collected.
@@ -168,6 +203,7 @@ class App:
         self.right = make_pane(panes, self.pane_font, ICONS["paint"], self.toggle_paint)
         panes.add(self.left.frame, weight=1)
         panes.add(self.right.frame, weight=1)
+        self.panes = panes
         self.left.text.configure(state="disabled")
         self.left_background = self.left.text.cget("background")
         self.tooltips["lock"] = Tooltip(self.left.toggle, "Unlock to edit the transcript")
@@ -242,15 +278,27 @@ class App:
         if self.settings_dialog is not None and self.settings_dialog.window.winfo_exists():
             self.settings_dialog.window.lift()
             return
-        self.settings_dialog = SettingsDialog(self.root, self.settings_values, self.keylog, self.apply_settings)
+        self.settings_dialog = SettingsDialog(self.root, config.values(self.config), self.keylog, self.apply_settings)
 
     def apply_settings(self, values: dict[Field, str]) -> None:
-        """Log what changed, secrets by name only. Step 3 writes the values to the .cfg."""
-        changes = describe_changes(self.settings_values, values)
+        """Write the dialog's values into the .cfg and log what changed, secrets by name only.
+
+        Step 4 makes the running app pick them up: hotkeys, providers, and so on.
+        """
+        try:
+            new_config, warnings = config.update_file(self.config_path, values)
+        except (OSError, UnicodeDecodeError, configparser.Error) as e:
+            message = f"Settings not saved: {config.describe_error(e)}"
+            log.warning("%s", message)
+            self.set_status(message, "error")
+            return
+        changes = describe_changes(config.values(self.config), values)
         for line in changes:
             log.info("setting %s", line)
-        self.settings_values = values
+        self.config = new_config
         self.set_status("Settings saved" if changes else "Settings saved, nothing changed")
+        for warning in warnings:
+            self.set_status(warning, "warning")
 
     # --- banner stubs, wired up in step 6 --------------------------------
 
@@ -281,5 +329,6 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     set_dpi_awareness()
     root = tk.Tk()
-    App(root)
+    app = App(root, config.CONFIG_PATH)
+    logging.getLogger().setLevel(app.config["logging"]["level"].upper())
     root.mainloop()
