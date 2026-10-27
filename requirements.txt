@@ -4,3 +4,7 @@ sounddevice
 soundfile
 pynput
 ollama
+# faster-whisper's audio decoder. PyAV 19 dropped the av.open(metadata_errors=...)
+# argument faster-whisper 1.2.1 passes, so every file transcribe crashes. Lift this
+# cap once a faster-whisper release supports PyAV 19.
+av<19
