@@ -2,9 +2,10 @@
 
 Refuses to save the PTT and push-to-note hotkeys equal.
 
-Built ahead of the config file so the rules for secrets exist before any secret
-is stored. A field in SECRET_FIELDS is masked, never handed to the key log (which
-refuses masked fields anyway), and describe_changes() never logs its value.
+Built ahead of the config file so the rules for secrets existed before any
+secret was stored. A field in config.SECRET_FIELDS is masked, never handed to the
+key log (which refuses masked fields anyway), and describe_changes() never logs
+its value.
 """
 
 from __future__ import annotations
@@ -17,15 +18,13 @@ from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, ttk
 
+from voice2memos.config import SECRET_FIELDS, Field
 from voice2memos.ui.panes import KeyLog, replace_text
 
 log = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 
-Field = tuple[str, str]  # (section, key) in the .cfg
-
-SECRET_FIELDS: set[Field] = {("keys", "openai"), ("keys", "anthropic")}
 HOTKEY = ("capture", "hotkey")
 NOTE_HOTKEY = ("capture", "note_hotkey")
 PROMPT = ("cleanup", "prompt")

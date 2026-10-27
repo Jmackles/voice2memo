@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 import re
 import time
+import tkinter as tk
 from tkinter import ttk
 
 import pytest
 
 from voice2memos import __version__
-from voice2memos.ui.app import BANNER, ICONS, STATUS_COLORS
+from voice2memos.ui.app import BANNER, ICONS, STATUS_COLORS, App
 from voice2memos.ui.panes import KeyLog, describe_key, replace_text
 
 BANNER_NAMES = [name for name, _ in BANNER]
@@ -250,3 +251,20 @@ def test_closing_the_window_writes_out_the_last_burst(app, caplog):
 def test_key_log_refuses_a_masked_field(app):
     with pytest.raises(ValueError, match="masked"):
         KeyLog(app.root).watch(ttk.Entry(app.root, show="•"), "api key")
+
+
+def test_a_broken_config_shows_in_the_status_line(tmp_path):
+    path =tmp_path / "voice2memos.cfg"
+    path.write_text("model = llama3\n", encoding="utf-8")
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        pytest.skip(f"tkinter has no display: {e}")
+    root.withdraw()
+    try:
+        app = App(root, path)
+        assert app.status_label.cget("text") == "Config error on line 1, using defaults"
+        assert str(app.status_label.cget("foreground")) == STATUS_COLORS["warning"]
+        assert path.with_name("voice2memos.cfg.bad").exists()
+    finally:
+        root.destroy()
