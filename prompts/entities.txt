@@ -1,0 +1,3 @@
+List the subjects this note is about, as a JSON object with one key "items" holding an array of strings.
+Include plain nouns like "fields" or "tables" as well as names.
+Use the exact spelling from the text. Return only the JSON object.

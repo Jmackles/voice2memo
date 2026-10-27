@@ -1,0 +1,2 @@
+Choose zero to two tags for this note from this list only: {pool}
+Return only a JSON object with one key "items" holding an array of the chosen tags.
