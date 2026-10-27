@@ -229,5 +229,4 @@ memos/
 *.cfg
 !voice2memos.example.cfg
 tests/fixtures-inbox/
-tests/vault/
 CLAUDE.md
