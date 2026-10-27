@@ -1,0 +1,6 @@
+# Pin each version the first time it is installed; bump on purpose only.
+faster-whisper
+sounddevice
+soundfile
+pynput
+ollama
