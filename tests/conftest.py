@@ -12,8 +12,8 @@ FIXTURES_DIR = TESTS_DIR / "fixtures"
 
 
 @pytest.fixture
-def app():
-    """The real window, withdrawn so nothing appears on screen."""
+def app(tmp_path: Path):
+    """The real window, withdrawn so nothing appears on screen, with its own config file."""
     from voice2memos.ui.app import App
 
     try:
@@ -21,7 +21,7 @@ def app():
     except tk.TclError as e:
         pytest.skip(f"tkinter has no display: {e}")
     root.withdraw()
-    yield App(root)
+    yield App(root, tmp_path / "voice2memos.cfg")
     try:
         root.destroy()
     except tk.TclError:
