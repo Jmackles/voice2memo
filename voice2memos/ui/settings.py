@@ -29,8 +29,9 @@ HOTKEY = ("capture", "hotkey")
 NOTE_HOTKEY = ("capture", "note_hotkey")
 PROMPT = ("cleanup", "prompt")
 
-PROVIDERS = ["ollama", "openai", "anthropic"]
-WHISPER_SIZES = ["tiny", "base", "small", "medium", "large"]
+# "fake" on both lists runs that stage from a fixture, see [fake] in the example cfg.
+PROVIDERS = ["ollama", "openai", "anthropic", "fake"]
+WHISPER_SIZES = ["tiny", "base", "small", "medium", "large", "fake"]
 DEVICES = ["auto", "cpu", "cuda"]
 CAPTURE_PROMPT = "Press a key…"
 

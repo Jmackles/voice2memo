@@ -15,7 +15,7 @@ from voice2memos.ui.app import BANNER, ICONS, STATUS_COLORS, App
 from voice2memos.ui.panes import KeyLog, describe_key, replace_text
 
 BANNER_NAMES = [name for name, _ in BANNER]
-STUB_NAMES = [name for name in BANNER_NAMES if name != "open_settings"]
+STUB_NAMES = ["open_log"]  # the log viewer is step 13
 
 
 def key_lines(caplog) -> list[str]:
@@ -46,11 +46,10 @@ def test_banner_stub_logs_its_name(app, caplog, name):
     assert f"stub: {name}" in caplog.messages
 
 
-def test_save_right_click_menu_offers_save_as(app, caplog):
+def test_save_right_click_menu_offers_save_as(app):
     assert app.save_menu.entrycget(0, "label") == "Save as…"
-    with caplog.at_level(logging.INFO):
-        app.save_menu.invoke(0)
-    assert "stub: save_as" in caplog.messages
+    app.save_menu.invoke(0)
+    assert app.status_label.cget("text") == "Nothing to save"
 
 
 def test_left_pane_starts_locked_and_toggles(app):
@@ -159,7 +158,8 @@ def typed(caplog) -> list[str]:
 
 
 def pending_timers(app) -> tuple[str, ...]:
-    return app.root.tk.splitlist(app.root.tk.call("after", "info"))
+    """Every scheduled ``after`` except the app's own poll for posted work."""
+    return tuple(t for t in app.root.tk.splitlist(app.root.tk.call("after", "info")) if t != app.drain_timer)
 
 
 def wait_for_key_lines(app, caplog) -> None:
@@ -251,6 +251,32 @@ def test_closing_the_window_writes_out_the_last_burst(app, caplog):
 def test_key_log_refuses_a_masked_field(app):
     with pytest.raises(ValueError, match="masked"):
         KeyLog(app.root).watch(ttk.Entry(app.root, show="•"), "api key")
+
+
+def test_saving_a_new_log_level_applies_without_restart(app, caplog, monkeypatch):
+    seen = []
+    monkeypatch.setattr("voice2memos.logsetup.set_level", seen.append)
+    from voice2memos import config as cfg
+
+    values = cfg.values(app.config)
+    with caplog.at_level(logging.INFO):
+        app.apply_settings(values)
+        assert seen == []
+        values[("logging", "level")] = "DEBUG"
+        app.apply_settings(values)
+    assert seen == ["DEBUG"]
+    assert "log level now DEBUG" in caplog.messages
+    assert app.status_label.cget("text") == "Settings saved"
+
+
+def test_a_tk_callback_exception_lands_in_the_log_and_status_line(app, caplog):
+    with caplog.at_level(logging.ERROR):
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError as e:
+            app.root.report_callback_exception(type(e), e, e.__traceback__)
+    assert "RuntimeError: boom" in caplog.text
+    assert app.status_label.cget("text") == "Unexpected error, see log"
 
 
 def test_a_broken_config_shows_in_the_status_line(tmp_path):

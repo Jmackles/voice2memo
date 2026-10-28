@@ -32,6 +32,8 @@ log = logging.getLogger(__name__)
 
 CONFIG_DIR = Path.home() / ".voice2memos"
 CONFIG_PATH = CONFIG_DIR / "voice2memos.cfg"
+LOG_DIR = CONFIG_DIR / "logs"
+APP_DIR = Path(__file__).resolve().parents[1]  # the checkout, where prompts/ and tests/fixtures/ live
 
 Field = tuple[str, str]  # (section, key)
 
@@ -42,6 +44,7 @@ DEFAULTS: dict[str, dict[str, str]] = {
         "input_device": "",
         "save_dir": "memos",
         "trash_dir": "memos/trash",
+        "open_dir": "",
     },
     "whisper": {
         "model_size": "small",
@@ -69,6 +72,8 @@ DEFAULTS: dict[str, dict[str, str]] = {
     "keys": {"openai": "", "anthropic": ""},
     "logging": {"level": "INFO"},
     "window": {"geometry": "960x600", "sash": ""},
+    # The fake backends: model_size = fake and provider = fake answer from this fixture.
+    "fake": {"fixture": "", "fail": "", "delay": "0"},
 }
 
 # Masked in Settings, never watched by the key log, and never logged by value.
@@ -76,6 +81,7 @@ SECRET_FIELDS: set[Field] = {("keys", "openai"), ("keys", "anthropic")}
 
 PROVIDERS = ("ollama", "openai", "anthropic", "fake")
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+STAGES = ("capture", "transcribe", "cleanup", "entities", "tags")
 
 HEADER = """\
 # voice2memos settings. Edit here or in Settings; a key left out uses its default.
@@ -107,6 +113,8 @@ CHECKS: dict[Field, tuple[Callable[[str], bool], str]] = {
     ("logging", "level"): (lambda v: v.upper() in LOG_LEVELS, ", ".join(LOG_LEVELS)),
     ("window", "geometry"): (lambda v: re.fullmatch(r"\d+x\d+", v) is not None, "width x height, like 960x600"),
     ("window", "sash"): (lambda v: v == "" or v.isdigit(), "blank or a number of pixels"),
+    ("fake", "fail"): (lambda v: set(v.split()) <= set(STAGES), "blank or stage names: " + ", ".join(STAGES)),
+    ("fake", "delay"): (_number(0), "a number of seconds"),
 }
 
 

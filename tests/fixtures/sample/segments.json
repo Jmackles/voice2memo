@@ -1,0 +1,43 @@
+[
+  {
+    "index": 0,
+    "start": 0.0,
+    "end": 3.2,
+    "text": " um so I was thinking about the uh database thing again",
+    "cleaned": "",
+    "words": [
+      {"word": " um", "start": 0.0, "end": 0.3},
+      {"word": " so", "start": 0.4, "end": 0.6},
+      {"word": " I", "start": 0.7, "end": 0.8},
+      {"word": " was", "start": 0.8, "end": 1.0},
+      {"word": " thinking", "start": 1.0, "end": 1.4},
+      {"word": " about", "start": 1.4, "end": 1.7},
+      {"word": " the", "start": 1.7, "end": 1.8},
+      {"word": " uh", "start": 1.9, "end": 2.1},
+      {"word": " database", "start": 2.2, "end": 2.7},
+      {"word": " thing", "start": 2.7, "end": 2.9},
+      {"word": " again", "start": 2.9, "end": 3.2}
+    ]
+  },
+  {
+    "index": 1,
+    "start": 3.4,
+    "end": 7.1,
+    "text": " like maybe Bookinnit should just have fields instead of tables you know",
+    "cleaned": "",
+    "words": [
+      {"word": " like", "start": 3.4, "end": 3.6},
+      {"word": " maybe", "start": 3.6, "end": 3.9},
+      {"word": " Bookinnit", "start": 3.9, "end": 4.5},
+      {"word": " should", "start": 4.5, "end": 4.8},
+      {"word": " just", "start": 4.8, "end": 5.0},
+      {"word": " have", "start": 5.0, "end": 5.2},
+      {"word": " fields", "start": 5.2, "end": 5.6},
+      {"word": " instead", "start": 5.6, "end": 6.0},
+      {"word": " of", "start": 6.0, "end": 6.1},
+      {"word": " tables", "start": 6.1, "end": 6.5},
+      {"word": " you", "start": 6.6, "end": 6.8},
+      {"word": " know", "start": 6.8, "end": 7.1}
+    ]
+  }
+]
