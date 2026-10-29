@@ -179,3 +179,13 @@ def test_open_note_prefers_obsidian_when_registered(monkeypatch):
     path = Path("C:/v/n.md")
     assert note.open_note(path, registered=True) == "Opened in Obsidian"
     assert opened == [f"obsidian://open?path={quote(str(path))}"]
+
+
+def test_keep_original_copies_once_and_never_again(sample):
+    original = sample.folder / note.ORIGINAL_SEGMENTS_FILE
+    first = (sample.folder / "segments.json").read_text(encoding="utf-8")
+    sample.keep_original()
+    assert original.read_text(encoding="utf-8") == first
+    (sample.folder / "segments.json").write_text("[]", encoding="utf-8")
+    sample.keep_original()
+    assert original.read_text(encoding="utf-8") == first

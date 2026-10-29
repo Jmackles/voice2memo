@@ -5,12 +5,13 @@ is the app's source of truth; the vault only ever receives a rendered copy::
 
     20261027-093400/
       memo.wav          as captured, never modified
-      segments.json     raw transcript
+      segments.json     raw transcript, rewritten when the Transcript is edited
+      segments.original.json   Whisper's own, kept on the first edit, never touched again
       cleaned.json      the same segments with cleaned text
       entities.json     link terms
       tags.json         proposed and rejected tags
       note.md           draft rendered from the above, regenerated on save
-      state.json        saved_to path if saved, created time
+      state.json        saved_to path if saved, created time, source file if opened
 
 Note file layout, written here and nowhere else::
 
@@ -50,12 +51,13 @@ from urllib.parse import quote
 from voice2memos.capture import WAV_NAME
 from voice2memos.cleanup import CLEANED_FILE, ENTITIES_FILE, TAGS_FILE
 from voice2memos.errors import SaveError
-from voice2memos.transcribe import SEGMENTS_FILE, Segment, load_segments, save_segments
+from voice2memos.transcribe import SEGMENTS_FILE, Segment, display_text, load_segments, save_segments
 
 log = logging.getLogger(__name__)
 
 NOTE_FILE = "note.md"
 STATE_FILE = "state.json"
+ORIGINAL_SEGMENTS_FILE = "segments.original.json"
 TRASH_DAYS = 30
 
 
@@ -70,10 +72,15 @@ class Memo:
     rejected_tags: list[str] = field(default_factory=list)
     saved_to: Path | None = None
     created: datetime = field(default_factory=lambda: datetime.now().astimezone())
+    source: Path | None = None  # the file it was opened from; None for a recording
 
     @property
     def stem(self) -> str:
         return self.folder.name
+
+    @property
+    def is_recording(self) -> bool:
+        return self.source is None
 
     @property
     def wav(self) -> Path:
@@ -85,17 +92,18 @@ class Memo:
 
     @property
     def raw_text(self) -> str:
-        return " ".join(s.text.strip() for s in self.segments).strip()
+        """What the Transcript pane shows: one paragraph per segment."""
+        return display_text(self.segments)
 
     @property
     def cleaned_text(self) -> str:
-        """What the note pane shows: one paragraph per segment."""
+        """What the Note pane shows: one paragraph per segment."""
         return "\n\n".join(s.shown.strip() for s in self.segments)
 
     @classmethod
-    def create(cls, folder: Path) -> Memo:
+    def create(cls, folder: Path, source: Path | None = None) -> Memo:
         folder.mkdir(parents=True, exist_ok=False)
-        memo = cls(folder)
+        memo = cls(folder, source=source)
         memo.save_state()
         return memo
 
@@ -106,6 +114,7 @@ class Memo:
         if (folder / STATE_FILE).exists():
             state = json.loads((folder / STATE_FILE).read_text(encoding="utf-8"))
             memo.saved_to = Path(state["saved_to"]) if state.get("saved_to") else None
+            memo.source = Path(state["source"]) if state.get("source") else None
             if state.get("created"):
                 memo.created = datetime.fromisoformat(state["created"])
         for name in (CLEANED_FILE, SEGMENTS_FILE):
@@ -120,11 +129,21 @@ class Memo:
         return memo
 
     def save_state(self) -> None:
-        state = {"saved_to": str(self.saved_to) if self.saved_to else None, "created": self.created.isoformat()}
+        state = {
+            "saved_to": str(self.saved_to) if self.saved_to else None,
+            "created": self.created.isoformat(),
+            "source": str(self.source) if self.source else None,
+        }
         (self.folder / STATE_FILE).write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
     def save_segments(self) -> None:
         save_segments(self.segments, self.folder / SEGMENTS_FILE)
+
+    def keep_original(self) -> None:
+        """Before the first hand edit, set Whisper's transcript aside so it's never lost."""
+        original = self.folder / ORIGINAL_SEGMENTS_FILE
+        if not original.exists() and (self.folder / SEGMENTS_FILE).exists():
+            shutil.copy2(self.folder / SEGMENTS_FILE, original)
 
     def save_cleaned(self) -> None:
         save_segments(self.segments, self.folder / CLEANED_FILE)
