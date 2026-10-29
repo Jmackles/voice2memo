@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import time
 import tkinter as tk
 from collections.abc import Callable
@@ -9,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from voice2memos import capture
+from voice2memos import capture, config
+from voice2memos.ui import player
 
 TESTS_DIR = Path(__file__).parent
 FIXTURES_DIR = TESTS_DIR / "fixtures"
@@ -56,12 +58,63 @@ def no_global_hotkeys(monkeypatch):
     return FakeHotkeys
 
 
+class FakeStream:
+    """Stands in for a sounddevice output stream: makes no sound; a test pulls frames by hand."""
+
+    opened: list[FakeStream] = []
+    fail = False
+
+    def __init__(self, rate: int, channels: int, callback) -> None:
+        self.rate, self.channels, self.callback = rate, channels, callback
+        self.started = self.stopped = self.closed = False
+        FakeStream.opened.append(self)
+
+    def start(self) -> None:
+        if FakeStream.fail:
+            raise OSError("no output device")
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def close(self) -> None:
+        self.closed = True
+
+    def pull(self, frames: int) -> bytes:
+        """What PortAudio would ask for next: ``frames`` frames through the callback."""
+        out = bytearray(frames * 2 * self.channels)
+        self.callback(out, frames, None, None)
+        return bytes(out)
+
+
+@pytest.fixture(autouse=True)
+def no_sound(monkeypatch):
+    FakeStream.opened.clear()
+    FakeStream.fail = False
+    monkeypatch.setattr(player, "open_output_stream", FakeStream)
+    return FakeStream
+
+
+def record_one(app, finish):
+    """Click record twice and wait for the memo to finish; returns it."""
+    app.buttons["record"].invoke()
+    assert app.recording
+    app.buttons["record"].invoke()
+    finish(app)
+    return app.memo
+
+
 @pytest.fixture
-def app_factory(tmp_path: Path):
-    """Build the real window, withdrawn, around a config written from ``text``."""
+def app_factory(tmp_path: Path, monkeypatch):
+    """Build the real window, withdrawn, around a config written from ``text``.
+
+    The default recordings folder is pinned inside pytest's temp folder, so a
+    test that leaves save_dir out never writes into the real Documents.
+    """
     from voice2memos.ui.app import App
 
-    roots = []
+    monkeypatch.setitem(config.DEFAULTS["capture"], "save_dir", str(tmp_path / "memos"))
+    apps = []
 
     def make(text: str = "") -> App:
         try:
@@ -69,18 +122,26 @@ def app_factory(tmp_path: Path):
         except tk.TclError as e:
             pytest.skip(f"tkinter has no display: {e}")
         root.withdraw()
-        roots.append(root)
         path = tmp_path / "voice2memos.cfg"
         if text:
             path.write_text(text, encoding="utf-8")
-        return App(root, path)
+        app = App(root, path)
+        apps.append(app)
+        return app
 
     yield make
-    for root in roots:
+    for app in apps:
         try:
-            root.destroy()
+            app.root.after_cancel(app.drain_timer)
+            app.player.close()
+            app.root.destroy()
         except tk.TclError:
             pass  # the test closed the window itself
+    # Free the window here, on the main thread. Left to the garbage collector it can
+    # be freed on a memo's worker thread, where every tk object waits a second for a
+    # main loop that never runs under pytest.
+    apps.clear()
+    gc.collect()
 
 
 @pytest.fixture

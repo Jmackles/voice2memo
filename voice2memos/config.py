@@ -42,8 +42,8 @@ DEFAULTS: dict[str, dict[str, str]] = {
         "hotkey": "<f9>",
         "note_hotkey": "<f10>",
         "input_device": "",
-        "save_dir": "memos",
-        "trash_dir": "memos/trash",
+        "save_dir": "~/Documents/voice2memos",
+        "trash_dir": "",  # blank: a trash folder inside save_dir
         "open_dir": "",
     },
     "whisper": {
@@ -71,7 +71,7 @@ DEFAULTS: dict[str, dict[str, str]] = {
     "vault": {"path": "", "attachments_subdir": "attachments"},
     "keys": {"openai": "", "anthropic": ""},
     "logging": {"level": "INFO"},
-    "window": {"geometry": "960x600", "sash": ""},
+    "window": {"geometry": "960x600", "sash": "", "volume": "100"},
     # The fake backends: model_size = fake and provider = fake answer from this fixture.
     "fake": {"fixture": "", "fail": "", "delay": "0"},
 }
@@ -113,6 +113,7 @@ CHECKS: dict[Field, tuple[Callable[[str], bool], str]] = {
     ("logging", "level"): (lambda v: v.upper() in LOG_LEVELS, ", ".join(LOG_LEVELS)),
     ("window", "geometry"): (lambda v: re.fullmatch(r"\d+x\d+", v) is not None, "width x height, like 960x600"),
     ("window", "sash"): (lambda v: v == "" or v.isdigit(), "blank or a number of pixels"),
+    ("window", "volume"): (lambda v: v.isdigit() and int(v) <= 100, "a whole number from 0 to 100"),
     ("fake", "fail"): (lambda v: set(v.split()) <= set(STAGES), "blank or stage names: " + ", ".join(STAGES)),
     ("fake", "delay"): (_number(0), "a number of seconds"),
 }
