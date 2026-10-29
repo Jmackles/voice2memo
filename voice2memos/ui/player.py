@@ -23,21 +23,30 @@ from tkinter import ttk
 
 import numpy as np
 
+from voice2memos import capture
+
 log = logging.getLogger(__name__)
 
 TICK_MS = 50
 
 
-def open_output_stream(rate: int, channels: int, callback: Callable) -> object:
-    """A sounddevice stream of 16-bit frames fed by ``callback``. Tests swap this out."""
+def open_output_stream(rate: int, channels: int, callback: Callable, device: int | None = None) -> object:
+    """A sounddevice stream of 16-bit frames fed by ``callback``; None is the default device. Tests swap this out."""
     import sounddevice as sd
 
-    return sd.RawOutputStream(samplerate=rate, channels=channels, dtype="int16", callback=callback)
+    return sd.RawOutputStream(samplerate=rate, channels=channels, dtype="int16", callback=callback, device=device)
 
 
 def format_time(seconds: float) -> str:
     seconds = int(seconds)
     return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def tone(seconds: float = 0.6, rate: int = 44100, hz: float = 440, loudness: float = 0.25) -> bytes:
+    """A short sine with soft edges, as mono 16-bit frames: the speaker test in Settings."""
+    t = np.arange(int(seconds * rate)) / rate
+    fade = np.minimum(1, np.minimum(t, seconds - t) / 0.03)  # no click at either end
+    return (np.sin(2 * np.pi * hz * t) * fade * loudness * 32767).astype("<i2").tobytes()
 
 
 class Playback:
@@ -52,6 +61,8 @@ class Playback:
         self.position = 0
         self.finished = False
         self.volume = 1.0  # 0 to 1, read by the callback on every block
+        self.output_device = ""  # a name from capture.list_devices, blank for the system default
+        self.note = ""  # set by play when the chosen device wasn't there
         self.stream = None
         self.lock = threading.Lock()
 
@@ -78,6 +89,10 @@ class Playback:
             if src.getsampwidth() != 2:
                 raise ValueError(f"{path.name} is not 16-bit PCM")
             rate, channels, frames = src.getframerate(), src.getnchannels(), src.readframes(src.getnframes())
+        self.load_frames(frames, rate, channels, path)
+
+    def load_frames(self, frames: bytes, rate: int, channels: int = 1, path: Path | None = None) -> None:
+        self.unload()
         self.path, self.rate, self.channels, self.frames = path, rate, channels, frames
         self.frame_bytes = 2 * channels
 
@@ -96,7 +111,8 @@ class Playback:
             if self.position >= self.total:
                 self.position = 0
             self.finished = False
-        stream = open_output_stream(self.rate, self.channels, self._callback)
+        device, self.note = capture.resolve_device(self.output_device, "output")
+        stream = open_output_stream(self.rate, self.channels, self._callback, device)
         try:
             stream.start()
         except Exception:
@@ -138,14 +154,15 @@ class PlayerBar:
         parent: tk.Misc,
         icons: dict[str, str],
         on_discard: Callable[[], None],
-        on_error: Callable[[str], None],
+        on_status: Callable[[str, str], None],
         icon_style: str = "",
     ) -> None:
-        """``icon_style`` names a ttk style prefix with .TButton and .TLabel variants for the icons."""
+        """``on_status(text, level)`` reaches the status line. ``icon_style`` names a ttk
+        style prefix with .TButton and .TLabel variants for the icons."""
         button_style = f"{icon_style}.TButton" if icon_style else "TButton"
         label_style = f"{icon_style}.TLabel" if icon_style else "TLabel"
         self.icons = icons
-        self.on_error = on_error
+        self.on_status = on_status
         self.playback = Playback()
         self.dragging = False
         self.timer: str | None = None
@@ -192,7 +209,7 @@ class PlayerBar:
         except (OSError, wave.Error, ValueError) as e:
             log.warning("can't load %s for playback: %s", path, e)
             self.clear()
-            self.on_error("Can't play this audio, see log")
+            self.on_status("Can't play this audio, see log", "error")
             return
         log.info("%s: player loaded, %s long", self.stem, format_time(self.playback.duration))
         self.scale.configure(to=max(self.playback.duration, 0.01))
@@ -235,11 +252,22 @@ class PlayerBar:
             self.playback.play()
         except Exception as e:  # sounddevice raises its own classes, plus OSError without a device
             log.warning("can't play audio: %s: %s", type(e).__name__, e)
-            self.on_error("Can't play audio, see log")
+            self.on_status("Can't play audio, see log", "error")
             return
         log.info("%s: play from %s", self.stem, format_time(self.playback.seconds))
+        if self.playback.note:
+            self.on_status(self.playback.note, "warning")
         self.play_button.configure(text=self.icons["pause"])
         self._schedule_tick()
+
+    def set_output_device(self, name: str) -> None:
+        """Play through ``name`` from now on; if playing, carry on there from the same spot."""
+        playing = self.playback.playing
+        if playing:
+            self.playback.pause()
+        self.playback.output_device = name
+        if playing:
+            self.play()
 
     def pause(self) -> None:
         """Pause if playing; harmless otherwise, so recording can call it unconditionally."""
