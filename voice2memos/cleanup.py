@@ -19,8 +19,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from voice2memos.errors import CleanupError, EntityError
@@ -154,6 +158,107 @@ def make_provider(cfg, section: str, repo_dir: Path) -> Provider:
         raise CleanupError("Unknown provider", f"[{section}] provider = {name}")
     options = {"keep_alive": settings["keep_alive"]} if section == "cleanup" else {}
     return classes[name](settings["model"], float(settings["temperature"]), **options)
+
+
+# --- which models exist ------------------------------------------------------
+#
+# The app never trusts a model name it hasn't seen: Settings offers what the
+# provider says it has right now, and startup checks the configured Ollama
+# model against what's pulled. Nothing here knows any model by name, so new
+# models just show up. The API providers are only asked when chosen, since
+# that is the user sending something off the machine.
+
+OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
+ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models?limit=1000"
+ANTHROPIC_VERSION = "2023-06-01"
+KEY_ENV = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+PROVIDER_NAMES = {"ollama": "Ollama", "openai": "OpenAI", "anthropic": "Anthropic"}
+
+
+def ollama_url() -> str:
+    """Where the Ollama server listens, honoring OLLAMA_HOST the way Ollama itself does."""
+    raw = os.environ.get("OLLAMA_HOST", "").strip()
+    scheme, sep, rest = raw.partition("://")
+    if sep:
+        port = 443 if scheme == "https" else 80
+    else:
+        scheme, rest, port = "http", raw, 11434
+    parsed = urllib.parse.urlsplit(f"{scheme}://{rest or '127.0.0.1'}")
+    host = parsed.hostname or "127.0.0.1"
+    if host in ("0.0.0.0", "::"):  # listen-on-everything addresses; connect locally instead
+        host = "127.0.0.1"
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parsed.port or port
+    except ValueError:
+        pass
+    return f"{scheme}://{host}:{port}"
+
+
+def same_model(a: str, b: str) -> bool:
+    """Ollama treats a name without a tag as name:latest."""
+
+    def tagged(name: str) -> str:
+        name = name.strip()
+        return name if ":" in name else name + ":latest"
+
+    return tagged(a) == tagged(b)
+
+
+def api_key(provider: str, configured: str) -> str:
+    """The key from Settings, else the environment. Never logged, never put in a message."""
+    return configured.strip() or os.environ.get(KEY_ENV.get(provider, ""), "").strip()
+
+
+def get_json(url: str, headers: dict[str, str], timeout: float, local: bool = False) -> dict:
+    """GET a JSON document. ``local`` skips any proxy, which Ollama on this machine never wants.
+
+    Tests swap this out. Raises urllib.error.HTTPError, OSError, or ValueError.
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({})) if local else urllib.request.build_opener()
+    with opener.open(urllib.request.Request(url, headers=headers), timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def available_models(provider: str, key: str = "", timeout: float = 5) -> tuple[list[str], str]:
+    """The models ``provider`` offers right now, and a note for Settings saying why when there are none.
+
+    Ollama: what's pulled on this machine. OpenAI and Anthropic: what the key
+    can use, newest first. ``key`` is the one from Settings; blank falls back
+    to the environment.
+    """
+    if provider == "fake":
+        return [], "The fake provider answers from a fixture; the model is ignored."
+    shown = PROVIDER_NAMES.get(provider, provider)
+    try:
+        if provider == "ollama":
+            data = get_json(ollama_url() + "/api/tags", {}, timeout, local=True)
+            names = sorted(m["name"] for m in data.get("models", []))
+            return names, "" if names else "Ollama has no models pulled yet. Pull one with: ollama pull <name>"
+        key = api_key(provider, key)
+        if not key:
+            return [], f"No {shown} API key: add one under API keys, or set {KEY_ENV[provider]}."
+        if provider == "openai":
+            data = get_json(OPENAI_MODELS_URL, {"Authorization": f"Bearer {key}"}, timeout)
+            models = sorted(data.get("data", []), key=lambda m: m.get("created", 0), reverse=True)
+        elif provider == "anthropic":
+            headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION}
+            models = get_json(ANTHROPIC_MODELS_URL, headers, timeout).get("data", [])  # newest first already
+        else:
+            return [], f"Unknown provider {provider}"
+        return [m["id"] for m in models], ""
+    except urllib.error.HTTPError as e:
+        log.warning("listing %s models: HTTP %s", provider, e.code)
+        if e.code in (401, 403):
+            return [], f"{shown} didn't accept the API key."
+        return [], f"{shown} answered HTTP {e.code} when asked for its models."
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        # Never the exception text itself: keep anything a server sent back out of the dialog.
+        log.warning("listing %s models: %s", provider, type(e).__name__)
+        if provider == "ollama":
+            return [], "Ollama isn't running. Start it, then reopen Settings."
+        return [], f"Couldn't reach {shown}."
 
 
 # --- stages -----------------------------------------------------------------

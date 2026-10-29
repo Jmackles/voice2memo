@@ -149,6 +149,32 @@ class WhisperTranscriber(Transcriber):
         raise TranscribeError("Whisper not built yet", "WhisperTranscriber arrives in build step 7")
 
 
+def whisper_models() -> tuple[list[str], str]:
+    """The model sizes the installed faster-whisper knows, and a note saying which are downloaded.
+
+    Asks the library rather than keeping a list, so a new release's models
+    just show up. Importing faster-whisper takes seconds: call this off the
+    UI thread.
+    """
+    try:
+        import faster_whisper
+        from faster_whisper.utils import download_model
+    except Exception as e:  # ImportError, or a CUDA or PyAV install that breaks on import
+        log.warning("faster-whisper won't import: %s: %s", type(e).__name__, e)
+        return [], "faster-whisper isn't installed; run python install.py"
+    names = list(faster_whisper.available_models())
+    downloaded = []
+    for name in names:
+        try:
+            download_model(name, local_files_only=True)  # only looks in the Hugging Face cache
+            downloaded.append(name)
+        except Exception:
+            pass
+    if downloaded:
+        return names, f"Downloaded: {', '.join(downloaded)}. Any other downloads the first time it's used."
+    return names, "None downloaded yet; the chosen one downloads the first time it's used."
+
+
 def make_transcriber(cfg, repo_dir: Path) -> Transcriber:
     """The transcriber the config asks for. ``repo_dir`` is where a relative fake fixture lives."""
     whisper = cfg["whisper"]
