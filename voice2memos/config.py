@@ -1,7 +1,7 @@
 """Config: ``.cfg`` load, defaults dict, apply.
 
 Sections mirror ``voice2memos.example.cfg``: capture, whisper, cleanup,
-entities, tags, vault, keys, logging, window. The defaults dict is the single
+entities, tags, vault, keys, playback, logging, window, fake. The defaults dict is the single
 source of truth for shipped values; the installer writes the initial .cfg from it.
 
 Notes from the design doc:
@@ -71,6 +71,7 @@ DEFAULTS: dict[str, dict[str, str]] = {
     "vault": {"path": "", "attachments_subdir": "attachments"},
     "keys": {"openai": "", "anthropic": ""},
     "logging": {"level": "INFO"},
+    "playback": {"output_device": ""},
     "window": {"geometry": "960x600", "sash": "", "volume": "100"},
     # The fake backends: model_size = fake and provider = fake answer from this fixture.
     "fake": {"fixture": "", "fail": "", "delay": "0"},

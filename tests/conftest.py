@@ -64,8 +64,8 @@ class FakeStream:
     opened: list[FakeStream] = []
     fail = False
 
-    def __init__(self, rate: int, channels: int, callback) -> None:
-        self.rate, self.channels, self.callback = rate, channels, callback
+    def __init__(self, rate: int, channels: int, callback, device: int | None = None) -> None:
+        self.rate, self.channels, self.callback, self.device = rate, channels, callback, device
         self.started = self.stopped = self.closed = False
         FakeStream.opened.append(self)
 
@@ -87,12 +87,82 @@ class FakeStream:
         return bytes(out)
 
 
+class FakeInputStream:
+    """Stands in for a sounddevice input stream: hears nothing until a test feeds it."""
+
+    opened: list[FakeInputStream] = []
+    fail = False
+
+    def __init__(self, device: int | None, rate: int, callback) -> None:
+        self.device, self.rate, self.callback = device, rate, callback
+        self.started = self.stopped = self.closed = False
+        FakeInputStream.opened.append(self)
+
+    def start(self) -> None:
+        if FakeInputStream.fail:
+            raise OSError("device unavailable")
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def close(self) -> None:
+        self.closed = True
+
+    def feed(self, frames: bytes) -> None:
+        self.callback(frames, len(frames) // 2, None, None)
+
+
+def fake_device(name: str, hostapi: int, inputs: int = 0, outputs: int = 0, rate: float = 44100.0) -> dict:
+    return {"name": name, "hostapi": hostapi, "max_input_channels": inputs, "max_output_channels": outputs,
+            "default_samplerate": rate}
+
+
+def fake_device_table() -> capture.DeviceTable:
+    """Shaped like a real Windows machine: MME (host API 0) cuts names and lists its mapper,
+    DirectSound (1) lists the same devices again with whole names."""
+    return capture.DeviceTable(
+        [
+            fake_device("Microsoft Sound Mapper - Input", 0, inputs=2),
+            fake_device("Microphone (USB Headset)", 0, inputs=1, rate=48000.0),
+            fake_device("Microsoft Sound Mapper - Output", 0, outputs=2),
+            fake_device("Speakers (Realtek(R) Audio)", 0, outputs=8),
+            fake_device("PHL 346E2C (NVIDIA High Definit", 0, outputs=2),
+            fake_device("Headphones (USB Headset)", 0, outputs=2),
+            fake_device("Microphone (USB Headset)", 1, inputs=1),
+            fake_device("Speakers (Realtek(R) Audio)", 1, outputs=8),
+            fake_device("PHL 346E2C (NVIDIA High Definition Audio)", 1, outputs=2),
+            fake_device("Headphones (USB Headset)", 1, outputs=2),
+        ],
+        hostapi=0,
+        default={"input": 1, "output": 3},
+    )
+
+
+class FakeAudio:
+    """The fake audio system every test runs against; a test can swap the table or count rescans."""
+
+    def __init__(self) -> None:
+        self.table = fake_device_table()
+        self.rescans = 0
+
+    def rescan(self) -> None:
+        self.rescans += 1
+
+
 @pytest.fixture(autouse=True)
 def no_sound(monkeypatch):
+    """No test plays a sound, opens a microphone, or depends on this machine's devices."""
     FakeStream.opened.clear()
     FakeStream.fail = False
+    FakeInputStream.opened.clear()
+    FakeInputStream.fail = False
+    audio = FakeAudio()
     monkeypatch.setattr(player, "open_output_stream", FakeStream)
-    return FakeStream
+    monkeypatch.setattr(capture, "open_input_stream", FakeInputStream)
+    monkeypatch.setattr(capture, "device_table", lambda: audio.table)
+    monkeypatch.setattr(capture, "rescan_devices", audio.rescan)
+    return audio
 
 
 def record_one(app, finish):

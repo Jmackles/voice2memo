@@ -2,6 +2,11 @@
 
 Refuses to save the PTT and push-to-note hotkeys equal.
 
+The Audio tab picks the microphone and the speakers by name, from the list
+capture.list_devices gives, with "System default" first. It can test both: a
+level meter on the microphone, a short tone on the speakers. Both stop when the
+dialog closes, and a device that isn't connected stays selected as such.
+
 Built ahead of the config file so the rules for secrets existed before any
 secret was stored. A field in config.SECRET_FIELDS is masked, never handed to the
 key log (which refuses masked fields anyway), and describe_changes() never logs
@@ -18,9 +23,11 @@ from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, ttk
 
-from voice2memos import config
+from voice2memos import capture, config
 from voice2memos.config import SECRET_FIELDS, Field
+from voice2memos.errors import CaptureError
 from voice2memos.ui.panes import KeyLog, replace_text
+from voice2memos.ui.player import Playback, tone
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +36,11 @@ PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 HOTKEY = ("capture", "hotkey")
 NOTE_HOTKEY = ("capture", "note_hotkey")
 PROMPT = ("cleanup", "prompt")
+INPUT_DEVICE = ("capture", "input_device")
+OUTPUT_DEVICE = ("playback", "output_device")
+DEVICE_KINDS = {INPUT_DEVICE: "input", OUTPUT_DEVICE: "output"}
+TEST_TICK_MS = 50
+AUDIO_LABEL_WIDTH = 11  # "Microphone" and "Speakers" alike, so the two lists line up
 
 # "fake" on both lists runs that stage from a fixture, see [fake] in the example cfg.
 PROVIDERS = ["ollama", "openai", "anthropic", "fake"]
@@ -110,9 +122,16 @@ class SettingsDialog:
         keylog: KeyLog,
         on_save: Callable[[dict[Field, str]], None],
         config_path: Path | None = None,
+        on_rescan: Callable[[], str] | None = None,
     ) -> None:
+        """``on_rescan`` has PortAudio look for devices again and returns why it couldn't, or blank."""
         self.keylog = keylog
         self.on_save = on_save
+        self.on_rescan = on_rescan
+        self.device_choices: dict[Field, dict[str, str]] = {}  # field -> shown text -> value in the .cfg
+        self.meter: capture.LevelMeter | None = None
+        self.test_tone: Playback | None = None
+        self.test_timer: str | None = None
         self.config_path = config_path or config.CONFIG_PATH  # relative folders are relative to its folder
         self.vars: dict[Field, tk.Variable] = {}
         self.texts: dict[Field, tk.Text] = {}
@@ -129,6 +148,7 @@ class SettingsDialog:
         notebook = ttk.Notebook(self.window)
         notebook.pack(fill="both", expand=True, padx=10, pady=(10, 0))
         notebook.add(self._general_tab(notebook), text="General")
+        notebook.add(self._audio_tab(notebook), text="Audio")
         notebook.add(self._models_tab(notebook), text="Models")
         notebook.add(self._prompt_tab(notebook), text="Prompt")
         notebook.add(self._words_tab(notebook), text="Words")
@@ -158,6 +178,27 @@ class SettingsDialog:
         whisper = self._group(tab, "Transcription")
         self._choice(whisper, ("whisper", "model_size"), "Whisper model", WHISPER_SIZES)
         self._choice(whisper, ("whisper", "device"), "Device", DEVICES)
+        return tab
+
+    def _audio_tab(self, notebook: ttk.Notebook) -> ttk.Frame:
+        tab = ttk.Frame(notebook, padding=10)
+        mic = self._group(tab, "Input")
+        self._device(mic, INPUT_DEVICE, "Microphone")
+        self.mic_test_button = ttk.Button(mic, text="Test", width=12, command=self.toggle_mic_test)
+        self.mic_test_button.grid(row=0, column=2, padx=(6, 0))
+        row = self._label(mic, "Level", width=AUDIO_LABEL_WIDTH)
+        self.level_bar = ttk.Progressbar(mic, maximum=1.0, mode="determinate")
+        self.level_bar.grid(row=row, column=1, sticky="ew")
+        speakers = self._group(tab, "Output")
+        self._device(speakers, OUTPUT_DEVICE, "Speakers")
+        self.tone_button = ttk.Button(speakers, text="Play a tone", width=12, command=self.play_tone)
+        self.tone_button.grid(row=0, column=2, padx=(6, 0))
+        bottom = ttk.Frame(tab)
+        bottom.pack(fill="x", pady=(4, 0))
+        ttk.Button(bottom, text="Rescan devices", command=self.rescan).pack(side="left")
+        self.audio_note = ttk.Label(bottom, text="Plugged something in? Rescan to list it.")
+        self.audio_note.pack(side="left", padx=(10, 0))
+        self._load_devices()
         return tab
 
     def _models_tab(self, notebook: ttk.Notebook) -> ttk.Frame:
@@ -202,9 +243,10 @@ class SettingsDialog:
         group.columnconfigure(1, weight=1)
         return group
 
-    def _label(self, group: ttk.Frame, text: str) -> int:
+    def _label(self, group: ttk.Frame, text: str, width: int | None = None) -> int:
+        """``width`` in characters lines the fields up across groups, which each have their own grid."""
         row = group.grid_size()[1]
-        ttk.Label(group, text=text).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=3)
+        ttk.Label(group, text=text, width=width).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=3)
         return row
 
     def _watch(self, widget: tk.Text | ttk.Entry, field: Field) -> None:
@@ -231,6 +273,14 @@ class SettingsDialog:
         self.widgets[field] = combo
         if editable:
             self._watch(combo, field)
+
+    def _device(self, group: ttk.Frame, field: Field, label: str) -> None:
+        row = self._label(group, label, width=AUDIO_LABEL_WIDTH)
+        var = self.vars[field] = tk.StringVar()
+        combo = ttk.Combobox(group, textvariable=var, state="readonly", width=44)
+        combo.grid(row=row, column=1, sticky="ew")
+        combo.bind("<<ComboboxSelected>>", lambda _e: self._device_picked(field), add="+")
+        self.widgets[field] = combo
 
     def _temperature(self, group: ttk.Frame, field: Field, label: str) -> None:
         row = self._label(group, label)
@@ -309,6 +359,8 @@ class SettingsDialog:
             var.set(float(value or 0) if isinstance(var, tk.DoubleVar) else value)
         for field, text in self.texts.items():
             replace_text(text, values.get(field, "") or (default_prompt() if field == PROMPT else ""))
+        for field in DEVICE_KINDS:
+            self._show_device(field, values.get(field, ""))
 
     def values(self) -> dict[Field, str]:
         values = {
@@ -317,6 +369,8 @@ class SettingsDialog:
         }
         for field, text in self.texts.items():
             values[field] = text.get("1.0", "end-1c").strip()
+        for field in DEVICE_KINDS:
+            values[field] = self.device_value(field)
         if values[PROMPT] == default_prompt():
             values[PROMPT] = ""  # blank in the .cfg means use prompts/rewrite.txt
         return values
@@ -335,5 +389,125 @@ class SettingsDialog:
         self.close()
 
     def close(self) -> None:
+        self.stop_mic_test()
+        self._stop_tone()
+        if self.test_timer is not None:
+            self.window.after_cancel(self.test_timer)
         self.keylog.flush_all()
         self.window.destroy()
+
+    # --- audio devices -------------------------------------------------------
+
+    def _load_devices(self) -> None:
+        """Fill both device lists from PortAudio, keeping whatever each one shows now."""
+        current = {field: self.device_value(field) for field in self.device_choices}
+        try:
+            table = capture.device_table()
+        except Exception as e:  # no sounddevice, or PortAudio failing
+            log.warning("couldn't list audio devices: %s: %s", type(e).__name__, e)
+            table = None
+        for field, kind in DEVICE_KINDS.items():
+            default = capture.default_device_name(kind, table) if table else ""
+            choices = {f"System default ({default})" if default else "System default": ""}
+            for name in capture.list_devices(kind, table) if table else []:
+                choices[name] = name
+            self.device_choices[field] = choices
+            self.widgets[field].configure(values=list(choices))
+        for field, value in current.items():
+            self._show_device(field, value)
+
+    def _show_device(self, field: Field, value: str) -> None:
+        """Select ``value`` in its list. One that isn't connected is added as such, so saving keeps it."""
+        choices = self.device_choices[field]
+        for shown, choice in choices.items():
+            if choice == value:
+                self.vars[field].set(shown)
+                return
+        shown = "Fake recorder, for testing" if value == "fake" else f"{value} (not connected)"
+        choices[shown] = value
+        self.widgets[field].configure(values=list(choices))
+        self.vars[field].set(shown)
+
+    def device_value(self, field: Field) -> str:
+        """The .cfg value behind what the list shows: a device name, or blank for the default."""
+        return self.device_choices[field].get(self.vars[field].get(), "")
+
+    def _device_picked(self, field: Field) -> None:
+        if field == INPUT_DEVICE and self.meter is not None:
+            self.stop_mic_test()
+            self.toggle_mic_test()  # carry on testing, on the new microphone
+
+    def toggle_mic_test(self) -> None:
+        """Open the chosen microphone and show its level, until pressed again or the dialog closes."""
+        if self.meter is not None:
+            self.stop_mic_test()
+            return
+        name = self.device_value(INPUT_DEVICE)
+        meter = capture.LevelMeter(name)
+        try:
+            note = meter.start()
+        except CaptureError as e:
+            log.warning("microphone test: %s: %s", e.message, e.detail)
+            self.audio_note.configure(text=e.message)
+            return
+        self.meter = meter
+        self.mic_test_button.configure(text="Stop")
+        self.audio_note.configure(text=note or "Say something: the level should move.")
+        log.info("settings: microphone test on %s", name or "the system default")
+        self._tick_test()
+
+    def stop_mic_test(self) -> None:
+        if self.meter is None:
+            return
+        self.meter.stop()
+        self.meter = None
+        self.level_bar["value"] = 0
+        self.mic_test_button.configure(text="Test")
+        log.info("settings: microphone test off")
+
+    def play_tone(self) -> None:
+        """A short beep on the chosen speakers."""
+        self._stop_tone()
+        name = self.device_value(OUTPUT_DEVICE)
+        beep = Playback()
+        beep.load_frames(tone(), 44100)
+        beep.output_device = name
+        try:
+            beep.play()
+        except Exception as e:  # sounddevice raises its own classes, plus OSError without a device
+            log.warning("speaker test: %s: %s", type(e).__name__, e)
+            self.audio_note.configure(text="Can't play on that device, see log")
+            return
+        self.test_tone = beep
+        self.audio_note.configure(text=beep.note or "You should hear a short beep.")
+        log.info("settings: test tone on %s", name or "the system default")
+        self._tick_test()
+
+    def _stop_tone(self) -> None:
+        if self.test_tone is not None:
+            self.test_tone.unload()
+            self.test_tone = None
+
+    def _tick_test(self) -> None:
+        """While a test runs: move the level bar, and close the tone's stream once it has played."""
+        if self.test_timer is not None:
+            self.window.after_cancel(self.test_timer)
+            self.test_timer = None
+        if self.meter is not None:
+            self.level_bar["value"] = self.meter.level
+        if self.test_tone is not None and self.test_tone.finished:
+            self._stop_tone()
+        if self.meter is not None or self.test_tone is not None:
+            self.test_timer = self.window.after(TEST_TICK_MS, self._tick_test)
+
+    def rescan(self) -> None:
+        """Look for devices plugged in since the list was made."""
+        self.stop_mic_test()
+        self._stop_tone()
+        problem = self.on_rescan() if self.on_rescan is not None else ""
+        if problem:
+            self.audio_note.configure(text=problem)
+            return
+        self._load_devices()
+        self.audio_note.configure(text="Device list updated.")
+        log.info("settings: audio devices rescanned")
