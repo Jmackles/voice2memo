@@ -163,3 +163,17 @@ def test_hotkey_capture_waits_for_a_real_key_and_escape_restores(dialog):
     assert dialog.capture(HOTKEY, "Tab", 0) is None
     dialog.end_capture(HOTKEY)
     assert var.get() == "<ctrl>+<f10>"
+
+
+@pytest.mark.parametrize("typed, starts_in", [("~/recs", "home"), ("recs", "beside the cfg"), ("", None)])
+def test_browse_starts_where_the_folder_field_points(app, dialog, monkeypatch, tmp_path, typed, starts_in):
+    from voice2memos.ui import settings
+
+    asked = []
+    monkeypatch.setattr(settings.filedialog, "askdirectory", lambda **kw: asked.append(kw["initialdir"]) or "")
+    var = dialog.vars[("capture", "save_dir")]
+    var.set(typed)
+    dialog._browse(var)
+    expected = {"home": Path.home() / "recs", "beside the cfg": tmp_path / "recs", None: None}[starts_in]
+    assert asked == [expected]
+    assert var.get() == typed  # cancelling the folder picker changes nothing
