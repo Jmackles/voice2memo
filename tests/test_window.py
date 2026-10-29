@@ -157,8 +157,9 @@ def typed(caplog) -> list[str]:
 
 
 def pending_timers(app) -> tuple[str, ...]:
-    """Every scheduled ``after`` except the app's own poll for posted work."""
-    return tuple(t for t in app.root.tk.splitlist(app.root.tk.call("after", "info")) if t != app.drain_timer)
+    """Every scheduled ``after`` except the app's own: the poll for posted work and the startup check."""
+    ours = (app.drain_timer, app.check_timer)
+    return tuple(t for t in app.root.tk.splitlist(app.root.tk.call("after", "info")) if t not in ours)
 
 
 def wait_for_key_lines(app, caplog) -> None:

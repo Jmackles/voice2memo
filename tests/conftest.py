@@ -165,6 +165,39 @@ def no_sound(monkeypatch):
     return audio
 
 
+class FakeModels:
+    """What each provider and faster-whisper say they have, as a test sets it. Counts the asking."""
+
+    def __init__(self) -> None:
+        self.lists: dict[str, tuple[list[str], str]] = {
+            "ollama": (["gemma4:e2b", "llama3.2:latest"], ""),
+            "openai": ([], "No OpenAI API key: add one under API keys, or set OPENAI_API_KEY."),
+            "anthropic": ([], "No Anthropic API key: add one under API keys, or set ANTHROPIC_API_KEY."),
+            "fake": ([], "The fake provider answers from a fixture; the model is ignored."),
+            "whisper": (["tiny", "small", "large-v3"], "Downloaded: small. Any other downloads the first time it's used."),
+        }
+        self.asked: list[tuple[str, str]] = []
+
+    def available(self, provider: str, key: str = "", timeout: float = 5) -> tuple[list[str], str]:
+        self.asked.append((provider, key))
+        return self.lists[provider]
+
+    def whisper(self) -> tuple[list[str], str]:
+        self.asked.append(("whisper", ""))
+        return self.lists["whisper"]
+
+
+@pytest.fixture(autouse=True)
+def no_model_servers(monkeypatch):
+    """No test reaches Ollama, OpenAI or Anthropic, or waits for faster-whisper to import."""
+    from voice2memos import cleanup, transcribe
+
+    models = FakeModels()
+    monkeypatch.setattr(cleanup, "available_models", models.available)
+    monkeypatch.setattr(transcribe, "whisper_models", models.whisper)
+    return models
+
+
 def record_one(app, finish):
     """Click record twice and wait for the memo to finish; returns it."""
     app.buttons["record"].invoke()
@@ -202,7 +235,10 @@ def app_factory(tmp_path: Path, monkeypatch):
     yield make
     for app in apps:
         try:
+            if app.settings_dialog is not None and app.settings_dialog.window.winfo_exists():
+                app.settings_dialog.close()
             app.root.after_cancel(app.drain_timer)
+            app.root.after_cancel(app.check_timer)
             app.player.close()
             app.root.destroy()
         except tk.TclError:

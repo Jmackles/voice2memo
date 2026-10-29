@@ -2,6 +2,11 @@
 
 Refuses to save the PTT and push-to-note hotkeys equal.
 
+No model name is written down here. The Models tab offers what each provider
+says it has when the dialog opens (Ollama: what's pulled; OpenAI, Anthropic:
+what the key can use), the Whisper list is faster-whisper's own, and a model
+that isn't on its list is flagged under the field.
+
 The Audio tab picks the microphone and the speakers by name, from the list
 capture.list_devices gives, with "System default" first. It can test both: a
 level meter on the microphone, a short tone on the speakers. Both stop when the
@@ -15,15 +20,18 @@ its value.
 
 from __future__ import annotations
 
+import functools
 import logging
+import queue
 import re
 import sys
+import threading
 import tkinter as tk
 from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, ttk
 
-from voice2memos import capture, config
+from voice2memos import capture, cleanup, config, transcribe
 from voice2memos.config import SECRET_FIELDS, Field
 from voice2memos.errors import CaptureError
 from voice2memos.ui.panes import KeyLog, replace_text
@@ -42,10 +50,16 @@ DEVICE_KINDS = {INPUT_DEVICE: "input", OUTPUT_DEVICE: "output"}
 TEST_TICK_MS = 50
 AUDIO_LABEL_WIDTH = 11  # "Microphone" and "Speakers" alike, so the two lists line up
 
-# "fake" on both lists runs that stage from a fixture, see [fake] in the example cfg.
+# The providers the app has code for. "fake" runs that stage from a fixture, see
+# [fake] in the example cfg. Model names are never listed here: the Models tab
+# asks each provider, and the Whisper list comes from faster-whisper itself.
 PROVIDERS = ["ollama", "openai", "anthropic", "fake"]
-WHISPER_SIZES = ["tiny", "base", "small", "medium", "large", "fake"]
+FAKE_WHISPER = "fake"
 DEVICES = ["auto", "cpu", "cuda"]
+WHISPER_MODEL = ("whisper", "model_size")
+NOTE_COLOR = "#666666"
+WARNING_COLOR = "#a35c00"
+LIST_POLL_MS = 100
 CAPTURE_PROMPT = "Press a key…"
 
 # Tk modifier bits as pynput names, in the order pynput chords are written.
@@ -76,6 +90,16 @@ PYNPUT_KEYS = {
     "Scroll_Lock": "scroll_lock",
     "Print": "print_screen",
 }
+
+
+def _answer_into(answers: queue.Queue, source: str, ask: Callable[[], tuple[list[str], str]]) -> None:
+    """A model-list thread: ask, and leave the answer for the dialog to pick up. Never raises."""
+    try:
+        answer = ask()
+    except Exception:
+        log.exception("listing %s models failed", source)
+        answer = ([], "Couldn't list the models, see log")
+    answers.put((source, answer))
 
 
 def format_hotkey(keysym: str, state: int) -> str:
@@ -132,6 +156,12 @@ class SettingsDialog:
         self.meter: capture.LevelMeter | None = None
         self.test_tone: Playback | None = None
         self.test_timer: str | None = None
+        # Model lists, fetched off the UI thread: source ("whisper" or a provider) -> (names, note).
+        self.model_notes: dict[str, ttk.Label] = {}
+        self.model_lists: dict[str, tuple[list[str], str]] = {}
+        self.listing: set[str] = set()
+        self.lists_ready: queue.Queue[tuple[str, tuple[list[str], str]]] = queue.Queue()
+        self.list_timer: str | None = None
         self.config_path = config_path or config.CONFIG_PATH  # relative folders are relative to its folder
         self.vars: dict[Field, tk.Variable] = {}
         self.texts: dict[Field, tk.Text] = {}
@@ -160,6 +190,9 @@ class SettingsDialog:
         ttk.Button(bottom, text="Save", command=self.save).pack(side="right")
         ttk.Button(bottom, text="Cancel", command=self.cancel).pack(side="right", padx=(0, 6))
         self.set_values(values)
+        self.list_models("whisper")
+        for section in ("cleanup", "entities"):
+            self.list_models(section)
 
     # --- tabs -------------------------------------------------------------
 
@@ -176,7 +209,8 @@ class SettingsDialog:
             column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
         whisper = self._group(tab, "Transcription")
-        self._choice(whisper, ("whisper", "model_size"), "Whisper model", WHISPER_SIZES)
+        self._choice(whisper, WHISPER_MODEL, "Whisper model", [])
+        self.model_notes["whisper"] = self._note(whisper)
         self._choice(whisper, ("whisper", "device"), "Device", DEVICES)
         return tab
 
@@ -207,10 +241,19 @@ class SettingsDialog:
             group = self._group(tab, title)
             self._choice(group, (section, "provider"), "Provider", PROVIDERS)
             self._choice(group, (section, "model"), "Model", [], editable=True)
+            self.model_notes[section] = self._note(group)
             self._temperature(group, (section, "temperature"), "Temperature")
+            self.widgets[(section, "provider")].bind(
+                "<<ComboboxSelected>>", lambda _e, s=section: self.list_models(s), add="+"
+            )
+            for event in ("<<ComboboxSelected>>", "<FocusOut>"):
+                self.widgets[(section, "model")].bind(event, lambda _e, s=section: self._show_model_note(s), add="+")
         keys = self._group(tab, "API keys")
         self._entry(keys, ("keys", "openai"), "OpenAI")
         self._entry(keys, ("keys", "anthropic"), "Anthropic")
+        for provider in ("openai", "anthropic"):
+            # A key typed or changed here: ask that provider again, with it.
+            self.widgets[("keys", provider)].bind("<FocusOut>", lambda _e, p=provider: self._key_changed(p), add="+")
         ttk.Label(keys, text="Blank uses OPENAI_API_KEY or ANTHROPIC_API_KEY from the environment.").grid(
             column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
@@ -273,6 +316,12 @@ class SettingsDialog:
         self.widgets[field] = combo
         if editable:
             self._watch(combo, field)
+
+    def _note(self, group: ttk.Frame) -> ttk.Label:
+        """A line of small print under the field above it, in the second column."""
+        note = ttk.Label(group, foreground=NOTE_COLOR, wraplength=420)
+        note.grid(row=group.grid_size()[1], column=1, columnspan=2, sticky="w", pady=(0, 4))
+        return note
 
     def _device(self, group: ttk.Frame, field: Field, label: str) -> None:
         row = self._label(group, label, width=AUDIO_LABEL_WIDTH)
@@ -391,10 +440,90 @@ class SettingsDialog:
     def close(self) -> None:
         self.stop_mic_test()
         self._stop_tone()
-        if self.test_timer is not None:
-            self.window.after_cancel(self.test_timer)
+        for timer in (self.test_timer, self.list_timer):
+            if timer is not None:
+                self.window.after_cancel(timer)
         self.keylog.flush_all()
         self.window.destroy()
+
+    # --- model lists -----------------------------------------------------------
+
+    def list_models(self, target: str) -> None:
+        """Fill ``target``'s model list ("whisper", "cleanup" or "entities") from what exists right now.
+
+        Each source is asked once per dialog, on a thread of its own, since
+        faster-whisper takes seconds to import and the API providers are a
+        network call away. The list fills in when the answer arrives.
+        """
+        source = self._source(target)
+        if source in self.model_lists:
+            self._show_models(target)
+            return
+        self.model_notes[target].configure(text="Looking for models…", foreground=NOTE_COLOR)
+        if source in self.listing:
+            return
+        self.listing.add(source)
+        if source == "whisper":
+            ask = transcribe.whisper_models
+        else:
+            key = self.vars[("keys", source)].get() if ("keys", source) in self.vars else ""
+            ask = functools.partial(cleanup.available_models, source, key)
+        # The thread gets the queue and the question, nothing of tk's.
+        threading.Thread(target=_answer_into, args=(self.lists_ready, source, ask), name=f"models-{source}", daemon=True).start()
+        if self.list_timer is None:
+            self.list_timer = self.window.after(LIST_POLL_MS, self._lists_arrived)
+
+    def _lists_arrived(self) -> None:
+        self.list_timer = None
+        while True:
+            try:
+                source, answer = self.lists_ready.get_nowait()
+            except queue.Empty:
+                break
+            self.listing.discard(source)
+            self.model_lists[source] = answer
+            log.info("settings: %s lists %d model(s)", source, len(answer[0]))
+            for target in ("whisper", "cleanup", "entities"):
+                if self._source(target) == source:
+                    self._show_models(target)
+        if self.listing:
+            self.list_timer = self.window.after(LIST_POLL_MS, self._lists_arrived)
+
+    def _source(self, target: str) -> str:
+        return "whisper" if target == "whisper" else self.vars[(target, "provider")].get().strip()
+
+    def _show_models(self, target: str) -> None:
+        names, _ = self.model_lists[self._source(target)]
+        if target == "whisper":
+            self.widgets[WHISPER_MODEL].configure(values=names + [FAKE_WHISPER])
+        else:
+            self.widgets[(target, "model")].configure(values=names)
+        self._show_model_note(target)
+
+    def _show_model_note(self, target: str) -> None:
+        """Say what the list is, or that the model typed in isn't on it."""
+        source = self._source(target)
+        if source not in self.model_lists:
+            return
+        names, note = self.model_lists[source]
+        field = WHISPER_MODEL if target == "whisper" else (target, "model")
+        model = self.vars[field].get().strip()
+        if names and model and model != FAKE_WHISPER and not any(cleanup.same_model(model, n) for n in names):
+            where = "faster-whisper" if source == "whisper" else cleanup.PROVIDER_NAMES.get(source, source)
+            have = "pulled in" if source == "ollama" else "offered by"
+            text, color = f"{model} isn't {have} {where}; pick one from the list.", WARNING_COLOR
+        elif note:
+            text, color = note, WARNING_COLOR if not names and source != "fake" else NOTE_COLOR
+        else:
+            have = "pulled in Ollama" if source == "ollama" else "available"
+            text, color = f"{len(names)} models {have}.", NOTE_COLOR
+        self.model_notes[target].configure(text=text, foreground=color)
+
+    def _key_changed(self, provider: str) -> None:
+        self.model_lists.pop(provider, None)
+        for section in ("cleanup", "entities"):
+            if self._source(section) == provider:
+                self.list_models(section)
 
     # --- audio devices -------------------------------------------------------
 
