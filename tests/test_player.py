@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import logging
+import tkinter as tk
 import wave
+from tkinter import ttk
 
 import numpy as np
 import pytest
 
 from voice2memos import config
 from voice2memos.ui.app import ICONS
-from voice2memos.ui.player import Playback, format_time
+from voice2memos.ui.player import Playback, click_to_jump, format_time
 
 from .conftest import FAKE_CFG, FakeStream, record_one
 
@@ -160,6 +162,50 @@ def test_letting_go_of_the_slider_seeks(fake_app, finish):
     assert not bar.dragging and bar.playback.seconds == 0.75
 
 
+@pytest.fixture
+def laid_out(app):
+    """A real slider in a window that's mapped (off screen), so pixels mean something."""
+    window = tk.Toplevel(app.root)
+    window.geometry("+-3000+-3000")
+    scale = ttk.Scale(window, from_=0, to=100, length=200)
+    scale.pack()
+    window.update()
+    yield scale
+    window.destroy()
+
+
+def at(scale: ttk.Scale, value: float) -> int:
+    """The x pixel ttk itself puts ``value`` at."""
+    return next(x for x in range(scale.winfo_width()) if scale.get(x, 5) >= value)
+
+
+def test_a_click_on_the_line_jumps_there_and_holds_for_a_drag(laid_out):
+    scale = laid_out
+    events = []
+    click_to_jump(scale, lambda: events.append("press"), lambda value: events.append(round(value)))
+    scale.event_generate("<ButtonPress-1>", x=at(scale, 75), y=5)
+    assert round(scale.get()) == 75 and events == ["press"]  # straight there, not one step toward it
+    scale.event_generate("<B1-Motion>", x=at(scale, 25), y=5)
+    assert round(scale.get()) == 25 and events == ["press"]  # following, not yet let go
+    scale.event_generate("<B1-Motion>", x=scale.winfo_width() + 300, y=5)
+    assert scale.get() == 100  # dragged past the end stops at the end
+    scale.event_generate("<ButtonRelease-1>", x=scale.winfo_width() + 300, y=5)
+    assert events == ["press", 100]
+
+
+def test_moving_without_a_press_or_on_a_disabled_line_does_nothing(laid_out):
+    scale = laid_out
+    events = []
+    click_to_jump(scale, lambda: events.append("press"), events.append)
+    scale.set(10)
+    scale.event_generate("<B1-Motion>", x=at(scale, 90), y=5)
+    scale.event_generate("<ButtonRelease-1>", x=at(scale, 90), y=5)
+    scale.state(["disabled"])
+    scale.event_generate("<ButtonPress-1>", x=at(scale, 90), y=5)
+    scale.event_generate("<ButtonRelease-1>", x=at(scale, 90), y=5)
+    assert scale.get() == 10 and events == []
+
+
 def test_recording_silences_and_locks_the_player(fake_app, finish):
     record_one(fake_app, finish)
     bar = fake_app.player
@@ -207,8 +253,10 @@ def test_the_volume_slider_sets_playback_live_and_logs_where_it_lands(fake_app, 
     assert bar.playback.volume == 0.4
     bar.set_volume(140)
     assert bar.volume_percent == 100 and bar.playback.volume == 1.0
-    bar.set_volume(35)
     with caplog.at_level(logging.INFO):
+        bar.volume.event_generate("<ButtonPress-1>")
+        bar.volume.set(35)  # as a drag would
+        assert bar.playback.volume == 0.35  # live, before it's let go
         bar.volume.event_generate("<ButtonRelease-1>")
     assert "volume 35%" in caplog.messages
 
@@ -228,8 +276,7 @@ def test_each_player_action_logs_one_line(fake_app, finish, caplog):
         bar.play_button.invoke()
         FakeStream.opened[-1].pull(8000)
         bar.play_button.invoke()
-        bar.scale.set(0.75)
-        bar._release()
+        bar._release(0.75)
         bar.play()
         FakeStream.opened[-1].pull(20000)
         bar._tick()

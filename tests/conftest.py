@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import time
 import tkinter as tk
+import types
 from collections.abc import Callable
 from pathlib import Path
 
@@ -187,14 +188,80 @@ class FakeModels:
         return self.lists["whisper"]
 
 
+class FakeWhisperModel:
+    """Stands in for faster_whisper.WhisperModel: records how it was made, answers with set segments."""
+
+    made: list[tuple[str, str, str]] = []
+    fail_on: set[str] = set()  # devices that raise on load, e.g. {"cuda"} for a machine without one
+    answer: list = []  # faster-whisper-shaped segments, see whisper_segment()
+
+    def __init__(self, model_size: str, device: str, compute_type: str) -> None:
+        if device in FakeWhisperModel.fail_on:
+            raise RuntimeError(f"CUDA driver version is insufficient ({device})")
+        FakeWhisperModel.made.append((model_size, device, compute_type))
+        self.calls: list[dict] = []
+
+    def transcribe(self, path: str, **options):
+        self.calls.append({"path": path, **options})
+        return iter(FakeWhisperModel.answer), types.SimpleNamespace(duration=2.4, language="en")
+
+
+def whisper_segment(start: float, end: float, text: str, words: list[tuple[float, float, str]] = ()):
+    """One segment as faster-whisper yields it: attributes, with a list of word objects."""
+    return types.SimpleNamespace(
+        start=start, end=end, text=text,
+        words=[types.SimpleNamespace(start=s, end=e, word=w) for s, e, w in words] or None,
+    )
+
+
+class FakeOllamaClient:
+    """Stands in for ollama.Client: records chats, answers with set text, raises what a test sets."""
+
+    calls: list[dict] = []
+    answers: list[str] = []
+    capabilities: list[str] = ["completion", "thinking"]
+    raise_on_chat: Exception | None = None
+    raise_on_show: Exception | None = None
+    made: list[tuple[str, float]] = []
+
+    def __init__(self, host: str, timeout: float) -> None:
+        FakeOllamaClient.made.append((host, timeout))
+
+    def show(self, model: str):
+        if FakeOllamaClient.raise_on_show is not None:
+            raise FakeOllamaClient.raise_on_show
+        return types.SimpleNamespace(capabilities=list(FakeOllamaClient.capabilities))
+
+    def chat(self, **kwargs):
+        FakeOllamaClient.calls.append(kwargs)
+        if FakeOllamaClient.raise_on_chat is not None:
+            raise FakeOllamaClient.raise_on_chat
+        text = FakeOllamaClient.answers.pop(0) if FakeOllamaClient.answers else kwargs["messages"][-1]["content"]
+        return types.SimpleNamespace(message=types.SimpleNamespace(content=text))
+
+
 @pytest.fixture(autouse=True)
 def no_model_servers(monkeypatch):
-    """No test reaches Ollama, OpenAI or Anthropic, or waits for faster-whisper to import."""
+    """No test reaches Ollama, OpenAI or Anthropic, loads a Whisper model, or imports faster-whisper."""
     from voice2memos import cleanup, transcribe
 
     models = FakeModels()
     monkeypatch.setattr(cleanup, "available_models", models.available)
     monkeypatch.setattr(transcribe, "whisper_models", models.whisper)
+    monkeypatch.setattr(transcribe, "load_whisper_model", FakeWhisperModel)
+    monkeypatch.setattr(transcribe, "_MODELS", {})
+    monkeypatch.setattr(cleanup, "ollama_client", lambda timeout: FakeOllamaClient("fake", timeout))
+    FakeWhisperModel.made.clear()
+    FakeWhisperModel.fail_on = set()
+    FakeWhisperModel.answer = [
+        whisper_segment(0.0, 1.2, " hello there", [(0.0, 0.5, " hello"), (0.6, 1.2, " there")]),
+        whisper_segment(1.4, 2.4, " again"),
+    ]
+    FakeOllamaClient.calls.clear()
+    FakeOllamaClient.answers = []
+    FakeOllamaClient.capabilities = ["completion", "thinking"]
+    FakeOllamaClient.raise_on_chat = FakeOllamaClient.raise_on_show = None
+    FakeOllamaClient.made.clear()
     return models
 
 
@@ -217,6 +284,8 @@ def app_factory(tmp_path: Path, monkeypatch):
     from voice2memos.ui.app import App
 
     monkeypatch.setitem(config.DEFAULTS["capture"], "save_dir", str(tmp_path / "memos"))
+    # And no Whisper warm-up thread unless a test asks for one with model_size = small.
+    monkeypatch.setitem(config.DEFAULTS["whisper"], "model_size", "fake")
     apps = []
 
     def make(text: str = "") -> App:

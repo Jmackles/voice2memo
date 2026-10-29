@@ -3,8 +3,8 @@
 Each provider exposes one ``complete`` method. The Fake provider answers from a
 fixture by matching on which prompt it was handed, and has modes that raise or
 sleep past the timeout for error-state tests. ``provider = fake`` in the .cfg
-runs the whole app end to end with no models loaded. The real providers are
-the grey box step 11 fills in.
+runs the whole app end to end with no models loaded. Ollama is real; the API
+providers are placeholders that say so.
 
 The three stage calls, ``rewrite``, ``extract_entities`` and ``choose_tags``,
 hold everything that isn't talking to a model: prompt loading, the per-segment
@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from voice2memos.errors import CleanupError, EntityError
+from voice2memos.errors import CleanupError, EntityError, ProviderError, VoiceMemoError
 from voice2memos.logsetup import timed
 from voice2memos.transcribe import Segment, load_segments
 
@@ -113,8 +113,62 @@ class FakeProvider(Provider):
         return json.loads((self.fixture / name).read_text(encoding="utf-8"))
 
 
+def ollama_client(timeout: float):
+    """An ``ollama.Client`` for the local server. Tests swap this out."""
+    import ollama
+
+    return ollama.Client(host=ollama_url(), timeout=timeout)
+
+
+class OllamaProvider(Provider):
+    """The local Ollama server through the ``ollama`` package's chat call.
+
+    Thinking is switched off for models that have it (Gemma 4 defaults to on,
+    which would spend the whole timeout reasoning and put think tags in the
+    answer). ``format="json"`` for the entity and tag calls. The model's
+    capabilities are asked once per provider instance.
+    """
+
+    name = "ollama"
+
+    def __init__(self, model: str, temperature: float, keep_alive: str = "30m", **_options) -> None:
+        self.model = model
+        self.temperature = temperature
+        self.keep_alive = keep_alive
+        self.thinks: bool | None = None  # unknown until the first call
+
+    def complete(self, system: str, user: str, *, json_mode: bool = False, timeout: float = 60) -> str:
+        import ollama
+
+        client = ollama_client(timeout)
+        try:
+            if self.thinks is None:
+                self.thinks = "thinking" in (client.show(self.model).capabilities or [])
+            response = client.chat(
+                model=self.model,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                options={"temperature": self.temperature},
+                format="json" if json_mode else None,
+                keep_alive=self.keep_alive,
+                think=False if self.thinks else None,
+            )
+        except ollama.ResponseError as e:
+            if e.status_code == 404:
+                raise ProviderError(f"Model {self.model} not found in Ollama", f"HTTP 404: {e.error}") from e
+            raise ProviderError("Cleanup failed, showing original", f"Ollama HTTP {e.status_code}: {e.error}") from e
+        except (ConnectionError, OSError) as e:  # httpx's connect errors are OSErrors
+            if "timeout" in type(e).__name__.lower() or "timed out" in str(e).lower():
+                raise ProviderError("Cleanup timed out, showing original", f"{type(e).__name__} after {timeout:g}s") from e
+            raise ProviderError("Ollama not running", f"{type(e).__name__}: {e}") from e
+        except Exception as e:
+            if "timeout" in type(e).__name__.lower():  # httpx.ReadTimeout and friends
+                raise ProviderError("Cleanup timed out, showing original", f"{type(e).__name__} after {timeout:g}s") from e
+            raise
+        return response.message.content or ""
+
+
 class _NotBuiltYet(Provider):
-    """Placeholder for a real provider. Holds its config; step 11 makes it talk."""
+    """Placeholder for an API provider. Holds its config; a later step makes it talk."""
 
     def __init__(self, model: str, temperature: float, **options) -> None:
         self.model = model
@@ -122,11 +176,7 @@ class _NotBuiltYet(Provider):
         self.options = options
 
     def complete(self, system: str, user: str, *, json_mode: bool = False, timeout: float = 60) -> str:
-        raise RuntimeError(f"{self.name} provider arrives in build step 11")
-
-
-class OllamaProvider(_NotBuiltYet):
-    name = "ollama"
+        raise ProviderError(f"{PROVIDER_NAMES[self.name]} provider isn't built yet", "choose ollama in Settings > Models")
 
 
 class OpenAIProvider(_NotBuiltYet):
@@ -277,6 +327,8 @@ def rewrite(provider: Provider, segments: list[Segment], prompt: str, timeout: f
             log.debug("%s: cleanup segment %d prompt:\n%s\n---\n%s", stem, segment.index, prompt, segment.text)
             try:
                 answer = provider.complete(prompt, segment.text, timeout=timeout)
+            except VoiceMemoError as e:  # the provider already knows what to tell the user
+                raise CleanupError(e.message, f"segment {segment.index}: {e.detail}") from e
             except Exception as e:
                 raise CleanupError("Cleanup failed, showing original", f"segment {segment.index}: {type(e).__name__}: {e}") from e
             log.debug("%s: cleanup segment %d answer:\n%s", stem, segment.index, answer)
@@ -328,6 +380,8 @@ def _ask_json(provider, system, user, timeout, stem, error, message) -> str:
     log.debug("%s: prompt:\n%s\n---\n%s", stem, system, user)
     try:
         answer = provider.complete(system, user, json_mode=True, timeout=timeout)
+    except VoiceMemoError as e:
+        raise error(message, e.detail) from e  # "Entities failed" says enough; the detail has the cause
     except Exception as e:
         raise error(message, f"{type(e).__name__}: {e}") from e
     log.debug("%s: answer:\n%s", stem, answer)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import shutil
+import time
 import tkinter as tk
 import wave
 from pathlib import Path
@@ -15,7 +16,7 @@ from voice2memos import config, note
 from voice2memos.ui import app as app_module
 from voice2memos.ui.app import ICONS
 
-from .conftest import FAKE_CFG, record_one
+from .conftest import FAKE_CFG, FakeOllamaClient, FakeWhisperModel, record_one
 
 EXPECTED_NOTE = "I was thinking about the database thing again.\n\nMaybe Bookinnit should just have fields instead of tables."
 EXPECTED_RAW = (
@@ -116,12 +117,27 @@ def test_transcription_failure_keeps_the_wav_and_stops_there(app_factory, finish
     assert pane(app, "left") == "" and app.retry_callback is not None
 
 
-def test_the_default_config_degrades_to_raw_text_until_the_models_exist(app_factory, finish):
-    app = app_factory("[capture]\ninput_device = fake\n[whisper]\nmodel_size = fake\n[fake]\nfixture = tests/fixtures/sample\n")
+OLLAMA_CFG = "[capture]\ninput_device = fake\n[whisper]\nmodel_size = fake\n[fake]\nfixture = tests/fixtures/sample\n"
+
+
+def test_the_default_config_runs_cleanup_through_ollama(app_factory, finish):
+    # Fake whisper and recorder, the real OllamaProvider over the fake client, which echoes.
+    app = app_factory(OLLAMA_CFG)
     record_one(app, finish)
     assert pane(app, "left") == EXPECTED_RAW
-    assert app.status_label.cget("text") in ("Cleanup failed, showing original", "Entities failed", "Tags failed")
-    assert app.memo.entities == [] and app.memo.tags == []
+    assert pane(app, "right") == EXPECTED_RAW
+    assert [c["model"] for c in FakeOllamaClient.calls] == ["gemma4:e2b"] * 4  # two segments, entities, tags
+    assert app.memo.entities == [] and app.memo.tags == []  # echoed prompts aren't JSON
+    assert app.status_label.cget("text") == "Ready"
+
+
+def test_ollama_down_degrades_to_raw_text_with_a_retry(app_factory, finish):
+    FakeOllamaClient.raise_on_show = ConnectionError("refused")
+    app = app_factory(OLLAMA_CFG)
+    record_one(app, finish)
+    assert pane(app, "right") == EXPECTED_RAW
+    assert app.status_label.cget("text") in ("Ollama not running", "Entities failed", "Tags failed")
+    assert app.retry_callback is not None
 
 
 def test_a_crash_in_the_worker_lands_in_the_status_line(fake_app, finish, monkeypatch, caplog):
@@ -315,3 +331,47 @@ def test_choose_vault_validates_and_persists(fake_app, monkeypatch, vault, tmp_p
     monkeypatch.setattr(app_module.note, "is_registered", lambda path: True)
     fake_app.buttons["choose_vault"].invoke()
     assert fake_app.status_label.cget("text") == f"Vault: {vault.name}"
+
+
+# --- the Whisper model warms up at startup -----------------------------------------
+
+
+def test_whisper_warms_up_at_startup_and_frees_the_buttons_when_loaded(app_factory, finish):
+    app = app_factory("[whisper]\nmodel_size = small\n[capture]\ninput_device = fake\n")
+    assert app.whisper_loading and app.buttons["record"].instate(["disabled"])
+    assert app.status_label.cget("text").startswith("Loading Whisper model")
+    app.record()  # the button itself is disabled; the hotkey path still gets here
+    assert not app.recording and app.status_label.cget("text") == "Whisper model still loading"
+    deadline = time.monotonic() + 5
+    while app.whisper_loading and time.monotonic() < deadline:
+        app.root.update()
+        time.sleep(0.01)
+    assert not app.whisper_loading and not app.buttons["record"].instate(["disabled"])
+    assert app.status_label.cget("text") == "Ready"
+    assert FakeWhisperModel.made == [("small", "cuda", "float16")]
+
+
+def test_a_cpu_fallback_shows_in_the_status_line(app_factory):
+    FakeWhisperModel.fail_on = {"cuda"}
+    app = app_factory("[whisper]\nmodel_size = small\n")
+    deadline = time.monotonic() + 5
+    while app.whisper_loading and time.monotonic() < deadline:
+        app.root.update()
+        time.sleep(0.01)
+    assert app.status_label.cget("text") == "GPU unavailable, using CPU"
+
+
+def test_changing_the_whisper_settings_warms_up_again(app_factory):
+    app = app_factory("[whisper]\nmodel_size = small\n")
+    deadline = time.monotonic() + 5
+    while app.whisper_loading and time.monotonic() < deadline:
+        app.root.update()
+        time.sleep(0.01)
+    values = config.values(app.config)
+    values[("whisper", "model_size")] = "tiny"
+    app.apply_settings(values)
+    assert app.whisper_loading
+    while app.whisper_loading and time.monotonic() < deadline + 5:
+        app.root.update()
+        time.sleep(0.01)
+    assert FakeWhisperModel.made == [("small", "cuda", "float16"), ("tiny", "cuda", "float16")]

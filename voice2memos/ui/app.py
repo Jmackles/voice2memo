@@ -128,6 +128,7 @@ class App:
         self.tooltips: dict[str, Tooltip] = {}
         self.memo: Memo | None = None
         self.busy = False
+        self.whisper_loading = False
         self.recording = False
         self.recorder: capture.Recorder | None = None
         self.dirty = False  # the Note has changes the saved copy doesn't
@@ -179,6 +180,43 @@ class App:
         note.purge_trash(self.trash_dir)
         self._drain_posted()
         self.check_timer = root.after(STARTUP_CHECK_MS, self.check_models)
+        self.warm_up_whisper()
+
+    def warm_up_whisper(self) -> None:
+        """Load the Whisper model on a thread now, so the first memo doesn't wait for it.
+
+        Record and Open stay off until it's in: the first run downloads
+        hundreds of MB and would otherwise look hung. A failure still lets
+        them on, since a recording is kept whether or not it transcribes.
+        """
+        if self.config["whisper"]["model_size"].strip().lower() == "fake" or self.whisper_loading:
+            return
+        self.whisper_loading = True
+        self._update_capture_buttons()
+        self.set_status("Loading Whisper model… (downloads on first use)")
+        transcriber = transcribe.make_transcriber(self.config, config.APP_DIR)
+
+        def work() -> None:
+            try:
+                transcriber.load()
+                self.post(self._whisper_ready, transcriber.note)
+            except VoiceMemoError as e:
+                self.post(self._whisper_ready, e.message, True)
+            except Exception:
+                log.exception("whisper warm-up crashed")
+                self.post(self._whisper_ready, logsetup.UNEXPECTED, True)
+
+        threading.Thread(target=work, name="whisper-load", daemon=True).start()
+
+    def _whisper_ready(self, note: str, failed: bool = False) -> None:
+        self.whisper_loading = False
+        self._update_capture_buttons()
+        if failed:
+            self.set_status(f"{note}; recordings are kept, transcription will fail", "error")
+        elif note:
+            self.set_status(note, "warning")
+        else:
+            self.set_status("Ready")
 
     def check_models(self) -> None:
         """Is Ollama up, with the models the config names? Says so in the status line if not.
@@ -494,6 +532,8 @@ class App:
             log.info("log level now %s", self.config["logging"]["level"].upper())
         if OUTPUT_DEVICE in changed:
             self.player.set_output_device(self.config["playback"]["output_device"])
+        if any(section == "whisper" for section, _ in changed):
+            self.warm_up_whisper()  # a model already loaded comes straight from the cache
         if changed & HOTKEY_FIELDS:
             self.hotkeys.bind(self.config["capture"]["hotkey"], self.config["capture"]["note_hotkey"])
 
@@ -526,8 +566,8 @@ class App:
         log.info("stub: push_to_note")
 
     def start_recording(self) -> None:
-        if self.busy:
-            self.set_status("Busy with the last memo", "warning")
+        if self._cannot_capture():
+            self.set_status(self._cannot_capture(), "warning")
             return
         self.recorder = capture.make_recorder(self.config, config.APP_DIR)
         try:
@@ -569,8 +609,8 @@ class App:
         A 16-bit WAV is copied in; anything else is decoded to one on the
         worker. Either way the original is only ever read.
         """
-        if self.busy:
-            self.set_status("Busy with the last memo", "warning")
+        if self._cannot_capture():
+            self.set_status(self._cannot_capture(), "warning")
             return
         initial = self.config["capture"]["open_dir"] or str(Path.home())
         picked = filedialog.askopenfilename(parent=self.root, title="Open audio file", filetypes=AUDIO_TYPES, initialdir=initial)
@@ -628,9 +668,10 @@ class App:
                     return
             if "transcribe" in stages:
                 try:
-                    memo.segments = transcribe.make_transcriber(cfg, config.APP_DIR).transcribe(memo.wav, stem)
+                    transcriber = transcribe.make_transcriber(cfg, config.APP_DIR)
+                    memo.segments = transcriber.transcribe(memo.wav, stem)
                     memo.save_segments()
-                    post(StageResult("transcribe", True))
+                    post(StageResult("transcribe", True, transcriber.note))  # e.g. "GPU unavailable, using CPU"
                 except VoiceMemoError as e:
                     log.warning("%s: %s: %s", stem, e.message, e.detail)
                     post(StageResult("transcribe", False, e.message))
@@ -722,10 +763,23 @@ class App:
 
     def set_busy(self, busy: bool) -> None:
         self.busy = busy
-        for name in BUSY_BUTTONS:
-            self.buttons[name].state(["disabled"] if busy else ["!disabled"])
+        self._update_capture_buttons()
         self.player.set_busy(busy)
         self.commit_button.state(["disabled"] if busy else ["!disabled"])
+
+    def _update_capture_buttons(self) -> None:
+        """Record and Open are off while a memo runs and while the Whisper model loads."""
+        off = self.busy or self.whisper_loading
+        for name in BUSY_BUTTONS:
+            self.buttons[name].state(["disabled"] if off else ["!disabled"])
+
+    def _cannot_capture(self) -> str:
+        """Why a recording or an open can't start right now, or blank."""
+        if self.busy:
+            return "Busy with the last memo"
+        if self.whisper_loading:
+            return "Whisper model still loading"
+        return ""
 
     # --- pane edits ------------------------------------------------------------
 

@@ -32,6 +32,15 @@ class TranscribeError(VoiceMemoError):
     """Whisper failed to load or produced nothing."""
 
 
+class ProviderError(VoiceMemoError):
+    """A model provider couldn't answer: not running, model not found, bad key, timed out.
+
+    ``message`` names the problem the way the status line should (the error
+    table in the design doc); the stage that was running wraps it in its own
+    error class and keeps the message.
+    """
+
+
 class CleanupError(VoiceMemoError):
     """The rewrite call failed, timed out, or returned rejected output."""
 

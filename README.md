@@ -62,7 +62,7 @@ In build order. Each step is meant to be runnable on its own before the next sta
 - [X] Settings dialog, applied without restart
 - [X] Testing workbench: bench.py and fake backends
 - [X] Buttons wired and tested against fakes
-- [ ] Whisper wrapper, tested from the bench
+- [X] Whisper wrapper, tested from the bench
 - [X] Transcript shown in the left pane via a worker thread
 - [ ] Editable and savable panes; notes land in the vault
 - [ ] Mock data: hand-written transcript and cleanup pairs as fixtures and prompt examples

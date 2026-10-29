@@ -75,11 +75,6 @@ def test_make_transcriber_follows_the_config(fixtures_dir):
     assert fake.fail
 
 
-def test_the_real_transcriber_says_it_is_not_built(fixtures_dir):
-    with pytest.raises(TranscribeError, match="not built yet"):
-        make_transcriber(config.new_parser(), config.APP_DIR).transcribe(fixtures_dir / "sample" / "memo.wav")
-
-
 SEGMENTS = [
     Segment(0, 0.0, 1.0, " first part", "First part.", [{"word": " first", "start": 0.0, "end": 0.5}]),
     Segment(1, 1.2, 2.0, " second part", "Second part.", [{"word": " second", "start": 1.2, "end": 1.6}]),
@@ -104,3 +99,95 @@ def test_an_edit_with_other_paragraphs_spans_the_whole_memo():
     assert [(s.index, s.start, s.end, s.text) for s in edited] == [(0, 0.0, 2.0, "all one paragraph")]
     edited = transcribe.apply_edit([], "typed\n\nfrom scratch")
     assert [(s.start, s.end, s.text) for s in edited] == [(0.0, 0.0, "typed"), (0.0, 0.0, "from scratch")]
+
+
+# --- the real wrapper, over a fake WhisperModel --------------------------------------
+
+from .conftest import FakeWhisperModel, whisper_segment  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "device, compute, plan",
+    [
+        ("auto", "auto", [("cuda", "float16"), ("cpu", "int8")]),
+        ("cpu", "auto", [("cpu", "int8")]),
+        ("cuda", "int8_float16", [("cuda", "int8_float16")]),
+        ("auto", "int8", [("cuda", "int8"), ("cpu", "int8")]),
+    ],
+)
+def test_resolve_whisper_plans_devices_and_compute_types(device, compute, plan):
+    assert transcribe.resolve_whisper(device, compute) == plan
+
+
+def wrapper(**overrides) -> WhisperTranscriber:
+    args = {"model_size": "small", "device": "auto", "compute_type": "auto", "language": "en", "glossary": ""}
+    args.update(overrides)
+    return WhisperTranscriber(**args)
+
+
+def test_whisper_segments_come_out_rounded_with_their_words(fixtures_dir, caplog):
+    w = wrapper(glossary="Bookinnit\n\n  Oakwillow  \n")
+    with caplog.at_level(logging.INFO):
+        segments = w.transcribe(fixtures_dir / "sample" / "memo.wav", "stem")
+    assert [(s.index, s.start, s.end, s.text, s.cleaned) for s in segments] == [
+        (0, 0.0, 1.2, " hello there", ""),
+        (1, 1.4, 2.4, " again", ""),
+    ]
+    assert segments[0].words == [{"word": " hello", "start": 0.0, "end": 0.5}, {"word": " there", "start": 0.6, "end": 1.2}]
+    assert segments[1].words == []
+    [call] = w.model.calls
+    assert call["language"] == "en" and call["word_timestamps"] and call["vad_filter"]
+    assert call["initial_prompt"] == "Bookinnit, Oakwillow"
+    assert w.loaded_on == ("cuda", "float16") and w.note == ""
+    assert "stem: 2.4s of audio on cuda float16" in caplog.messages
+
+
+def test_the_model_is_loaded_once_and_shared(fixtures_dir):
+    a, b = wrapper(), wrapper()
+    a.load()
+    b.load()
+    assert FakeWhisperModel.made == [("small", "cuda", "float16")]
+    assert a.model is b.model
+    wrapper(model_size="tiny").load()
+    assert FakeWhisperModel.made[-1] == ("tiny", "cuda", "float16")
+
+
+def test_no_cuda_falls_back_to_cpu_int8_with_a_note(caplog):
+    FakeWhisperModel.fail_on = {"cuda"}
+    w = wrapper()
+    with caplog.at_level(logging.WARNING):
+        w.load()
+    assert FakeWhisperModel.made == [("small", "cpu", "int8")]
+    assert w.loaded_on == ("cpu", "int8") and w.note == "GPU unavailable, using CPU"
+    assert "won't load on cuda float16" in caplog.text
+
+
+def test_an_explicit_cuda_that_fails_is_an_error_not_a_fallback():
+    FakeWhisperModel.fail_on = {"cuda"}
+    with pytest.raises(TranscribeError, match="Whisper model unavailable"):
+        wrapper(device="cuda").load()
+    assert FakeWhisperModel.made == []
+
+
+def test_nothing_heard_is_its_own_error(fixtures_dir):
+    FakeWhisperModel.answer = []
+    with pytest.raises(TranscribeError, match="Nothing heard"):
+        wrapper().transcribe(fixtures_dir / "sample" / "memo.wav")
+
+
+def test_a_decode_failure_is_a_transcribe_error(fixtures_dir, monkeypatch):
+    w = wrapper()
+    w.load()
+    monkeypatch.setattr(w.model, "transcribe", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bad file")))
+    with pytest.raises(TranscribeError, match="Transcription failed") as info:
+        w.transcribe(fixtures_dir / "sample" / "memo.wav")
+    assert "RuntimeError: bad file" in info.value.detail
+
+
+def test_make_transcriber_builds_the_real_one_from_the_config():
+    cfg = config.new_parser()
+    cfg["whisper"]["model_size"] = "medium"
+    cfg["whisper"]["glossary"] = "Bookinnit"
+    w = make_transcriber(cfg, config.APP_DIR)
+    assert isinstance(w, WhisperTranscriber)
+    assert (w.model_size, w.device, w.compute_type, w.language, w.glossary) == ("medium", "auto", "auto", "en", "Bookinnit")

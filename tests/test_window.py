@@ -289,8 +289,9 @@ def test_a_broken_config_shows_in_the_status_line(tmp_path):
     root.withdraw()
     try:
         app = App(root, path)
-        assert app.status_label.cget("text") == "Config error on line 1, using defaults"
-        assert str(app.status_label.cget("foreground")) == STATUS_COLORS["warning"]
+        # The Whisper warm-up (defaults, so a real model size) posts over it; the history keeps it.
+        when, level, text = app.status_history[0]
+        assert (level, text) == ("warning", "Config error on line 1, using defaults")
         assert path.with_name("voice2memos.cfg.bad").exists()
     finally:
         root.destroy()

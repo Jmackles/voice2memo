@@ -11,15 +11,19 @@ Segment contract (one per Whisper segment, serialized beside the WAV):
 Every transcriber has one method, ``transcribe(wav) -> list[Segment]``, and
 raises TranscribeError for anything it can't do. ``make_transcriber`` picks one
 from the config: ``model_size = fake`` gives FakeWhisper, which answers from a
-fixture folder so the whole app runs without a model. The real wrapper is the
-grey box step 7 fills in.
+fixture folder so the whole app runs without a model; anything else is a
+faster-whisper model name for WhisperTranscriber.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import sys
+import sysconfig
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -92,15 +96,21 @@ def load_segments(path: Path) -> list[Segment]:
 
 
 class Transcriber:
-    """WAV in, segments out. Subclasses implement ``_transcribe``."""
+    """WAV in, segments out. Subclasses implement ``_transcribe``.
+
+    ``note`` is set when the transcriber settled for less than asked (CPU
+    instead of CUDA), for the status line.
+    """
 
     name = "transcriber"
+    note = ""
+    stem = ""
 
     def transcribe(self, wav: Path, stem: str = "") -> list[Segment]:
-        stem = stem or wav.parent.name
-        with timed(log, f"transcribe ({self.name})", stem):
+        self.stem = stem or wav.parent.name
+        with timed(log, f"transcribe ({self.name})", self.stem):
             segments = self._transcribe(wav)
-        log.info("%s: %d segments", stem, len(segments))
+        log.info("%s: %d segments", self.stem, len(segments))
         return segments
 
     def _transcribe(self, wav: Path) -> list[Segment]:
@@ -133,8 +143,67 @@ class FakeWhisper(Transcriber):
         return load_segments(folder / SEGMENTS_FILE)
 
 
+def prepare_cuda_dlls() -> None:
+    """On Windows, put the pip-installed cuBLAS and cuDNN DLL folders where ctranslate2 can find them.
+
+    Must run before faster-whisper is first imported. Harmless elsewhere, or
+    when the CUDA wheels aren't installed.
+    """
+    if sys.platform != "win32":
+        return
+    nvidia = Path(sysconfig.get_paths()["purelib"]) / "nvidia"
+    folders = [str(p) for p in nvidia.glob("*/bin") if p.is_dir()]
+    for folder in folders:
+        os.add_dll_directory(folder)
+    if folders:
+        os.environ["PATH"] = os.pathsep.join(folders + [os.environ.get("PATH", "")])
+
+
+# Loaded models, by (size, device, compute type). A model takes seconds to load
+# and hundreds of MB, so each is loaded once and shared by every memo after.
+_MODELS: dict[tuple[str, str, str], object] = {}
+_MODELS_LOCK = threading.Lock()
+
+
+def load_whisper_model(model_size: str, device: str, compute_type: str):
+    """``faster_whisper.WhisperModel``, downloading on first use. Tests swap this out.
+
+    A model already in the Hugging Face cache is loaded from there without
+    asking the hub for a newer revision: the app is offline unless the user
+    points it at an API provider, and that check is a network request on
+    every launch.
+    """
+    prepare_cuda_dlls()
+    from faster_whisper import WhisperModel
+    from faster_whisper.utils import download_model
+
+    try:
+        source = download_model(model_size, local_files_only=True)
+    except Exception:  # not cached yet: let WhisperModel download it
+        source = model_size
+        log.info("whisper %s isn't downloaded yet, fetching it", model_size)
+    return WhisperModel(source, device=device, compute_type=compute_type)
+
+
+def resolve_whisper(device: str, compute_type: str) -> list[tuple[str, str]]:
+    """The (device, compute type) pairs to try, in order. ``auto`` means CUDA first, then CPU int8."""
+    devices = ["cuda", "cpu"] if device == "auto" else [device]
+    plan = []
+    for dev in devices:
+        if compute_type == "auto":
+            plan.append((dev, "float16" if dev == "cuda" else "int8"))
+        else:
+            plan.append((dev, compute_type))
+    return plan
+
+
 class WhisperTranscriber(Transcriber):
-    """The real one. Step 7 fills this in; until then it says so."""
+    """faster-whisper: word timestamps, VAD, the language pinned, the glossary as the initial prompt.
+
+    ``load`` picks the device: with ``device = auto`` it tries CUDA and falls
+    back to CPU int8, setting ``note`` ("GPU unavailable, using CPU") for the
+    status line. Loading is slow, so the app warms it up on a thread at startup.
+    """
 
     name = "whisper"
 
@@ -144,9 +213,63 @@ class WhisperTranscriber(Transcriber):
         self.compute_type = compute_type
         self.language = language
         self.glossary = glossary
+        self.note = ""
+        self.model = None
+        self.loaded_on: tuple[str, str] | None = None
+
+    def load(self) -> None:
+        """Have the model in memory, loading it if no memo has needed it yet. Raises TranscribeError."""
+        if self.model is not None:
+            return
+        plan = resolve_whisper(self.device, self.compute_type)
+        last: Exception | None = None
+        for device, compute_type in plan:
+            key = (self.model_size, device, compute_type)
+            with _MODELS_LOCK:
+                try:
+                    if key not in _MODELS:
+                        log.info("loading whisper %s on %s %s", *key)
+                        started = time.perf_counter()
+                        _MODELS[key] = load_whisper_model(*key)
+                        log.info("whisper %s loaded on %s %s in %.1fs", *key, time.perf_counter() - started)
+                    self.model = _MODELS[key]
+                except Exception as e:  # ctranslate2 raises RuntimeError for missing CUDA, ValueError for bad types
+                    last = e
+                    log.warning("whisper %s won't load on %s %s: %s: %s", *key, type(e).__name__, e)
+                    continue
+            self.loaded_on = (device, compute_type)
+            if device == "cpu" and self.device == "auto" and plan[0][0] == "cuda":
+                self.note = "GPU unavailable, using CPU"
+            return
+        raise TranscribeError("Whisper model unavailable", f"{type(last).__name__}: {last}" if last else "no device to try")
 
     def _transcribe(self, wav: Path) -> list[Segment]:
-        raise TranscribeError("Whisper not built yet", "WhisperTranscriber arrives in build step 7")
+        self.load()
+        glossary = [line.strip() for line in self.glossary.splitlines() if line.strip()]
+        try:
+            raw, info = self.model.transcribe(
+                str(wav),
+                language=self.language or None,
+                word_timestamps=True,
+                vad_filter=True,
+                initial_prompt=", ".join(glossary) or None,
+            )
+            segments = [
+                Segment(
+                    index,
+                    round(s.start, 2),
+                    round(s.end, 2),
+                    s.text,
+                    words=[{"word": w.word, "start": round(w.start, 2), "end": round(w.end, 2)} for w in (s.words or [])],
+                )
+                for index, s in enumerate(raw)  # the generator runs here; faster-whisper is lazy
+            ]
+        except Exception as e:  # PyAV decode errors, ctranslate2 runtime errors
+            raise TranscribeError("Transcription failed", f"{type(e).__name__}: {e}") from e
+        log.info("%s: %.1fs of audio on %s", self.stem, info.duration, " ".join(self.loaded_on or ()))
+        if not segments:
+            raise TranscribeError("Nothing heard in the recording", f"{info.duration:.1f}s of audio, no speech found")
+        return segments
 
 
 def whisper_models() -> tuple[list[str], str]:
@@ -157,6 +280,7 @@ def whisper_models() -> tuple[list[str], str]:
     UI thread.
     """
     try:
+        prepare_cuda_dlls()
         import faster_whisper
         from faster_whisper.utils import download_model
     except Exception as e:  # ImportError, or a CUDA or PyAV install that breaks on import

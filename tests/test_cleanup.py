@@ -172,8 +172,85 @@ def test_make_provider_follows_the_config(fixtures_dir):
     assert (fake.fixture, fake.fail, fake.delay) == (fixtures_dir / "sample", {"tags"}, 0.5)
 
 
-def test_the_real_providers_say_they_are_not_built(segments):
+# --- the real Ollama provider, over a fake client ------------------------------------
+
+from voice2memos.cleanup import OllamaProvider  # noqa: E402
+from voice2memos.errors import ProviderError  # noqa: E402
+
+from .conftest import FakeOllamaClient  # noqa: E402
+
+
+def ollama_error(status: int, text: str = "nope"):
+    import ollama
+
+    return ollama.ResponseError(text, status)
+
+
+def test_ollama_chats_with_thinking_off_and_the_settings_from_config(segments):
     provider = make_provider(config.new_parser(), "cleanup", config.APP_DIR)
+    assert isinstance(provider, OllamaProvider)
+    FakeOllamaClient.answers = ["One.", "Two."]
+    cleanup.rewrite(provider, segments, "the prompt", 60, "x")
+    assert [s.cleaned for s in segments] == ["One.", "Two."]
+    first = FakeOllamaClient.calls[0]
+    assert first["model"] == "gemma4:e2b"
+    assert first["messages"] == [{"role": "system", "content": "the prompt"}, {"role": "user", "content": segments[0].text}]
+    assert first["options"] == {"temperature": 0.0} and first["format"] is None
+    assert first["keep_alive"] == "30m" and first["think"] is False
+    assert FakeOllamaClient.made[0] == ("fake", 60)
+
+
+def test_ollama_leaves_think_alone_for_a_model_without_it():
+    FakeOllamaClient.capabilities = ["completion"]
+    provider = OllamaProvider("plain:latest", 0.0)
+    provider.complete("s", "u")
+    provider.complete("s", "u")
+    assert all(call["think"] is None for call in FakeOllamaClient.calls)
+    assert provider.thinks is False  # asked once, remembered
+
+
+def test_ollama_json_mode_asks_for_json():
+    OllamaProvider("m", 0.0).complete("s", "u", json_mode=True)
+    assert FakeOllamaClient.calls[0]["format"] == "json"
+
+
+def test_a_missing_model_names_it(segments):
+    FakeOllamaClient.raise_on_chat = ollama_error(404, "model not found")
     with pytest.raises(CleanupError) as info:
-        cleanup.rewrite(provider, segments, "p", 60, "x")
-    assert "ollama provider arrives in build step 11" in info.value.detail
+        cleanup.rewrite(OllamaProvider("gone:latest", 0.0), segments, "p", 60, "x")
+    assert info.value.message == "Model gone:latest not found in Ollama"
+    assert "HTTP 404" in info.value.detail
+
+
+def test_ollama_down_is_said_plainly(segments):
+    FakeOllamaClient.raise_on_show = ConnectionError("refused")
+    with pytest.raises(CleanupError) as info:
+        cleanup.rewrite(OllamaProvider("m", 0.0), segments, "p", 60, "x")
+    assert info.value.message == "Ollama not running"
+
+
+def test_a_timeout_is_said_as_one(segments):
+    class ReadTimeout(Exception):
+        pass
+
+    FakeOllamaClient.raise_on_chat = ReadTimeout("slow")
+    with pytest.raises(CleanupError) as info:
+        cleanup.rewrite(OllamaProvider("m", 0.0), segments, "p", 7, "x")
+    assert info.value.message == "Cleanup timed out, showing original" and "after 7s" in info.value.detail
+
+
+def test_entities_keep_their_own_message_and_the_providers_detail():
+    FakeOllamaClient.raise_on_show = ConnectionError("refused")
+    with pytest.raises(EntityError) as info:
+        cleanup.extract_entities(OllamaProvider("m", 0.0), "t", 30, "x")
+    assert info.value.message == "Entities failed" and "ConnectionError" in info.value.detail
+
+
+def test_the_api_providers_say_they_are_not_built(segments):
+    provider = make_provider(config.new_parser(), "entities", config.APP_DIR)
+    assert isinstance(provider, cleanup.OllamaProvider)
+    cfg = config.new_parser()
+    cfg["cleanup"]["provider"] = "anthropic"
+    with pytest.raises(CleanupError) as info:
+        cleanup.rewrite(make_provider(cfg, "cleanup", config.APP_DIR), segments, "p", 60, "x")
+    assert info.value.message == "Anthropic provider isn't built yet"

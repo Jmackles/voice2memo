@@ -98,7 +98,7 @@ def test_cancel_saves_nothing(app, dialog):
     dialog.vars[("whisper", "model_size")].set("medium")
     dialog.cancel()
     assert not dialog.window.winfo_exists()
-    assert app.config["whisper"]["model_size"] == "small"
+    assert app.config["whisper"]["model_size"] == "fake"  # the test default; the dialog's "medium" never landed
     assert app.config_path.read_text(encoding="utf-8") == before
 
 

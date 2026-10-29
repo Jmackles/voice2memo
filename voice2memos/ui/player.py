@@ -42,6 +42,42 @@ def format_time(seconds: float) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
+def click_to_jump(scale: ttk.Scale, on_press: Callable[[], None], on_release: Callable[[float], None]) -> None:
+    """Clicking anywhere on the line puts the knob there and holds it, so the same press can drag.
+
+    Replaces ttk's own press, which steps the value one unit toward the
+    click and repeats while held: on a scrub bar in seconds, a crawl. Setting
+    the value fires the scale's ``command`` as usual, so whatever follows the
+    knob still does. ``on_release`` gets the value where it was let go.
+    """
+    held = False
+
+    def press(event: tk.Event) -> str:
+        nonlocal held
+        if scale.instate(["disabled"]):
+            return "break"
+        held = True
+        on_press()
+        scale.set(scale.get(event.x, event.y))  # get(x, y) clamps to the ends, so off-line drags stop there
+        return "break"
+
+    def drag(event: tk.Event) -> str:
+        if held:
+            scale.set(scale.get(event.x, event.y))
+        return "break"
+
+    def release(_event: tk.Event) -> str:
+        nonlocal held
+        if held:
+            held = False
+            on_release(scale.get())
+        return "break"
+
+    scale.bind("<ButtonPress-1>", press)
+    scale.bind("<B1-Motion>", drag)
+    scale.bind("<ButtonRelease-1>", release)
+
+
 def tone(seconds: float = 0.6, rate: int = 44100, hz: float = 440, loudness: float = 0.25) -> bytes:
     """A short sine with soft edges, as mono 16-bit frames: the speaker test in Settings."""
     t = np.arange(int(seconds * rate)) / rate
@@ -183,10 +219,9 @@ class PlayerBar:
         self.volume.grid(row=0, column=4)
         self.discard_button.grid(row=0, column=5, padx=(8, 0))
         self.frame.columnconfigure(1, weight=1, minsize=80)
-        # Seek when the slider is let go, not on every pixel of a drag.
-        self.scale.bind("<ButtonPress-1>", self._grab, add="+")
-        self.scale.bind("<ButtonRelease-1>", self._release, add="+")
-        self.volume.bind("<ButtonRelease-1>", self._volume_released, add="+")
+        # A click lands the knob where it was clicked and holds it; the seek waits for the release.
+        click_to_jump(self.scale, self._grab, self._release)
+        click_to_jump(self.volume, lambda: None, self._volume_released)
         self.clear()
 
     @property
@@ -313,14 +348,14 @@ class PlayerBar:
     def _show_time(self, seconds: float) -> None:
         self.time_label.configure(text=f"{format_time(seconds)} / {format_time(self.playback.duration)}")
 
-    def _grab(self, _event: tk.Event | None = None) -> None:
-        self.dragging = True
+    def _grab(self) -> None:
+        self.dragging = True  # the play position stops moving the knob until it's let go
 
-    def _release(self, _event: tk.Event | None = None) -> None:
+    def _release(self, seconds: float) -> None:
         self.dragging = False
         if not self.playback.total:
             return
-        self.playback.seek(self.scale.get())
+        self.playback.seek(seconds)
         self._show_time(self.playback.seconds)
         log.info("%s: seek to %s", self.stem, format_time(self.playback.seconds))
 
@@ -330,5 +365,5 @@ class PlayerBar:
     def _volume_moved(self, value: str) -> None:
         self.playback.volume = float(value) / 100  # live, so dragging is heard as it moves
 
-    def _volume_released(self, _event: tk.Event | None = None) -> None:
+    def _volume_released(self, _percent: float) -> None:
         log.info("volume %d%%", self.volume_percent)

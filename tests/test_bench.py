@@ -61,10 +61,13 @@ def test_a_differing_result_shows_a_diff_and_fails(capsys, fixtures_dir, tmp_pat
     assert "-- matches tags.json" in out
 
 
-def test_without_fakes_the_default_config_reports_the_missing_backend(capsys, fixtures_dir, cfg_path):
+def test_without_fakes_the_config_picks_the_backend(capsys, fixtures_dir, cfg_path):
+    # Ollama is real (here a fake client that echoes); an API provider still says it isn't built.
+    status, out, _ = run(capsys, "--config", cfg_path, "clean", fixtures_dir / "sample" / "segments.json")
+    assert status == 1 and "  > um so I was thinking about the uh database thing again" in out
+    cfg_path.write_text("[cleanup]\nprovider = openai\n", encoding="utf-8")
     status, _, err = run(capsys, "--config", cfg_path, "clean", fixtures_dir / "sample" / "segments.json")
-    assert status == 1
-    assert "Cleanup failed, showing original: segment 0: RuntimeError: ollama provider arrives" in err
+    assert status == 1 and "OpenAI provider isn't built yet" in err
 
 
 def test_fake_backends_can_come_from_the_config_too(capsys, fixtures_dir, cfg_path):
