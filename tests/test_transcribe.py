@@ -78,3 +78,29 @@ def test_make_transcriber_follows_the_config(fixtures_dir):
 def test_the_real_transcriber_says_it_is_not_built(fixtures_dir):
     with pytest.raises(TranscribeError, match="not built yet"):
         make_transcriber(config.new_parser(), config.APP_DIR).transcribe(fixtures_dir / "sample" / "memo.wav")
+
+
+SEGMENTS = [
+    Segment(0, 0.0, 1.0, " first part", "First part.", [{"word": " first", "start": 0.0, "end": 0.5}]),
+    Segment(1, 1.2, 2.0, " second part", "Second part.", [{"word": " second", "start": 1.2, "end": 1.6}]),
+]
+
+
+def test_display_text_is_a_paragraph_per_segment():
+    assert transcribe.display_text(SEGMENTS) == "first part\n\nsecond part"
+
+
+def test_an_edit_with_the_same_paragraphs_keeps_timing_and_untouched_words():
+    edited = transcribe.apply_edit(SEGMENTS, "first part\n\nsecond   part, changed\n")
+    assert [(s.index, s.start, s.end, s.text, s.cleaned) for s in edited] == [
+        (0, 0.0, 1.0, "first part", ""),
+        (1, 1.2, 2.0, "second part, changed", ""),
+    ]
+    assert edited[0].words == SEGMENTS[0].words and edited[1].words == []
+
+
+def test_an_edit_with_other_paragraphs_spans_the_whole_memo():
+    edited = transcribe.apply_edit(SEGMENTS, "all\none paragraph")
+    assert [(s.index, s.start, s.end, s.text) for s in edited] == [(0, 0.0, 2.0, "all one paragraph")]
+    edited = transcribe.apply_edit([], "typed\n\nfrom scratch")
+    assert [(s.start, s.end, s.text) for s in edited] == [(0.0, 0.0, "typed"), (0.0, 0.0, "from scratch")]

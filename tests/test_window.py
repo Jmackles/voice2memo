@@ -32,7 +32,6 @@ def test_banner_buttons_in_order_with_tooltips(app):
         "Open audio file",
         "Save (right-click for Save as)",
         "Record",
-        "Discard",
         "Choose vault",
         "Settings",
         "Log",
@@ -294,3 +293,22 @@ def test_a_broken_config_shows_in_the_status_line(tmp_path):
         assert path.with_name("voice2memos.cfg.bad").exists()
     finally:
         root.destroy()
+
+
+def test_every_click_is_logged_even_when_nothing_follows(app, caplog, monkeypatch):
+    from voice2memos.ui import app as app_module
+
+    monkeypatch.setattr(app_module.filedialog, "askopenfilename", lambda **kw: "")
+    with caplog.at_level(logging.INFO):
+        app.buttons["open_file"].invoke()  # then cancelled
+        app.save_menu.invoke(0)
+        app.set_status("Cleanup failed", "error", retry=lambda: None)
+        app.retry_label.event_generate("<Button-1>")
+    assert [m for m in caplog.messages if m.startswith("click: ")] == ["click: open_file", "click: save_as", "click: retry"]
+
+
+def test_hotkeys_are_logged(fake_app, caplog):
+    with caplog.at_level(logging.INFO):
+        fake_app.hotkey_pressed()
+        fake_app.hotkey_released()
+    assert "hotkey: push-to-talk down" in caplog.messages and "hotkey: push-to-talk up" in caplog.messages

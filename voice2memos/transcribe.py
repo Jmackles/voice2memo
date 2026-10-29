@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -47,8 +48,32 @@ class Segment:
 
 
 def joined_text(segments: list[Segment], cleaned: bool = False) -> str:
-    """The segments as one string for a pane, raw or cleaned."""
+    """The segments as one string for a prompt, raw or cleaned."""
     return " ".join((s.shown if cleaned else s.text).strip() for s in segments).strip()
+
+
+def display_text(segments: list[Segment]) -> str:
+    """The raw transcript as the Transcript pane shows it: one paragraph per segment."""
+    return "\n\n".join(s.text.strip() for s in segments)
+
+
+def apply_edit(segments: list[Segment], text: str) -> list[Segment]:
+    """The Transcript pane's text back into segments, one per paragraph.
+
+    With as many paragraphs as segments, each keeps its timing, and its word
+    timestamps too if its text didn't change. Otherwise the timing is no
+    longer known, so each paragraph spans the whole memo. Cleaned text always
+    goes: it belonged to the old words.
+    """
+    paragraphs = [" ".join(p.split()) for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if len(paragraphs) == len(segments):
+        return [
+            Segment(s.index, s.start, s.end, p, "", s.words if p == " ".join(s.text.split()) else [])
+            for s, p in zip(segments, paragraphs)
+        ]
+    start = segments[0].start if segments else 0.0
+    end = segments[-1].end if segments else 0.0
+    return [Segment(i, start, end, p) for i, p in enumerate(paragraphs)]
 
 
 def save_segments(segments: list[Segment], path: Path) -> None:

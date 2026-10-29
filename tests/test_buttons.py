@@ -1,10 +1,12 @@
-"""Every banner button does what it says, against the fakes: record, open, discard, vault, save."""
+"""Every button does what it says, against the fakes: record, open, discard, vault, save."""
 
 from __future__ import annotations
 
 import logging
+import math
 import shutil
 import tkinter as tk
+import wave
 from pathlib import Path
 
 import pytest
@@ -13,22 +15,16 @@ from voice2memos import config, note
 from voice2memos.ui import app as app_module
 from voice2memos.ui.app import ICONS
 
-from .conftest import FAKE_CFG
+from .conftest import FAKE_CFG, record_one
 
 EXPECTED_NOTE = "I was thinking about the database thing again.\n\nMaybe Bookinnit should just have fields instead of tables."
-EXPECTED_RAW = "um so I was thinking about the uh database thing again like maybe Bookinnit should just have fields instead of tables you know"
+EXPECTED_RAW = (
+    "um so I was thinking about the uh database thing again\n\nlike maybe Bookinnit should just have fields instead of tables you know"
+)
 
 
 def pane(app, side: str) -> str:
     return getattr(app, side).text.get("1.0", "end-1c")
-
-
-def record_one(app, finish):
-    app.buttons["record"].invoke()
-    assert app.recording and app.buttons["record"].cget("text") == "⏹"
-    app.buttons["record"].invoke()
-    finish(app)
-    return app.memo
 
 
 # --- record ------------------------------------------------------------------
@@ -52,13 +48,13 @@ def test_record_writes_the_wav_then_fills_both_panes(fake_app, finish, caplog):
 
 def test_buttons_are_disabled_while_the_worker_runs(fake_app, finish):
     fake_app.buttons["record"].invoke()
+    assert fake_app.buttons["record"].cget("text") == ICONS["stop"]
     fake_app.buttons["record"].invoke()
     assert fake_app.busy
-    for name in ("open_file", "record", "discard"):
-        assert fake_app.buttons[name].instate(["disabled"])
+    busy = [fake_app.buttons["open_file"], fake_app.buttons["record"], fake_app.player.discard_button]
+    assert all(button.instate(["disabled"]) for button in busy)
     finish(fake_app)
-    for name in ("open_file", "record", "discard"):
-        assert not fake_app.buttons[name].instate(["disabled"])
+    assert not any(button.instate(["disabled"]) for button in busy)
 
 
 def test_a_dead_microphone_shows_in_the_status_line(app_factory):
@@ -99,7 +95,7 @@ def test_cleanup_failure_shows_raw_text_with_a_retry_that_reruns_only_cleanup(ap
         record_one(app, finish)
     assert app.status_label.cget("text") == "Cleanup failed, showing original"
     assert app.retry_label.winfo_manager() == "pack"
-    assert pane(app, "right") == EXPECTED_RAW.replace(" like", "\n\nlike")  # raw per segment
+    assert pane(app, "right") == EXPECTED_RAW  # raw, a paragraph per segment, like the Transcript
     assert app.memo.entities == ["database", "Bookinnit", "fields", "tables"]  # later stages still ran
 
     app.config["fake"]["fail"] = ""
@@ -149,6 +145,7 @@ def test_open_file_copies_the_wav_and_remembers_the_folder(fake_app, finish, mon
     fake_app.buttons["open_file"].invoke()
     finish(fake_app)
     assert fake_app.memo.wav.read_bytes() == source.read_bytes() and source.exists()
+    assert fake_app.memo.source == source and note.Memo.open(fake_app.memo.folder).source == source
     assert pane(fake_app, "right") == EXPECTED_NOTE
     assert config.load(fake_app.config_path)[0]["capture"]["open_dir"] == str(source.parent)
     assert asked[0]["initialdir"] == str(Path.home())
@@ -157,11 +154,39 @@ def test_open_file_copies_the_wav_and_remembers_the_folder(fake_app, finish, mon
     assert asked[1]["initialdir"] == str(source.parent)
 
 
-def test_open_file_refuses_mp3_until_whisper_exists(fake_app, monkeypatch, tmp_path):
-    monkeypatch.setattr(app_module.filedialog, "askopenfilename", lambda **kw: str(tmp_path / "song.mp3"))
+def test_other_audio_is_decoded_on_the_worker_and_the_original_left_alone(fake_app, finish, monkeypatch, tmp_path, caplog):
+    # An 8-bit stereo WAV stands in for an mp3: PyAV decodes both, and the test needs no encoder.
+    source = tmp_path / "odd.wav"
+    with wave.open(str(source), "wb") as out:
+        out.setnchannels(2)
+        out.setsampwidth(1)
+        out.setframerate(22050)
+        out.writeframes(bytes(128 + int(100 * math.sin(i / 10)) for i in range(22050 * 2)))
+    before = source.read_bytes()
+    monkeypatch.setattr(app_module.filedialog, "askopenfilename", lambda **kw: str(source))
+    with caplog.at_level(logging.INFO):
+        fake_app.buttons["open_file"].invoke()
+        finish(fake_app)
+    with wave.open(str(fake_app.memo.wav)) as decoded:
+        assert (decoded.getnchannels(), decoded.getsampwidth(), decoded.getframerate()) == (1, 2, 22050)
+    assert source.read_bytes() == before
+    assert f"{fake_app.memo.stem}: decode done in" in caplog.text
+    assert fake_app.player.playback.path == fake_app.memo.wav
+    assert pane(fake_app, "right") == EXPECTED_NOTE
+
+
+def test_unreadable_audio_says_so_and_retry_tries_the_decode_again(fake_app, finish, monkeypatch, tmp_path):
+    source = tmp_path / "song.mp3"
+    source.write_bytes(b"not audio at all")
+    monkeypatch.setattr(app_module.filedialog, "askopenfilename", lambda **kw: str(source))
     fake_app.buttons["open_file"].invoke()
-    assert fake_app.memo is None
-    assert fake_app.status_label.cget("text") == "Only WAV files until Whisper is wired in"
+    finish(fake_app)
+    assert fake_app.status_label.cget("text") == "Can't read that audio file"
+    assert not fake_app.memo.wav.exists() and not fake_app.player.playback.total
+    assert source.read_bytes() == b"not audio at all"
+    fake_app.retry_label.event_generate("<Button-1>")
+    finish(fake_app)
+    assert fake_app.status_label.cget("text") == "Can't read that audio file"
 
 
 # --- save ----------------------------------------------------------------------
@@ -245,13 +270,20 @@ def test_closing_with_edits_asks_first(fake_app, finish, monkeypatch):
 
 def test_discard_moves_the_memo_to_the_trash_and_clears_the_panes(fake_app, finish):
     memo = record_one(fake_app, finish)
-    fake_app.buttons["discard"].invoke()
+    fake_app.player.discard_button.invoke()
     assert not memo.folder.exists()
     assert (fake_app.trash_dir / memo.stem / "memo.wav").exists()
     assert pane(fake_app, "left") == "" and pane(fake_app, "right") == ""
     assert fake_app.memo is None and fake_app.status_label.cget("text") == f"Discarded {memo.stem}"
-    fake_app.buttons["discard"].invoke()
+    assert fake_app.player.discard_button.winfo_manager() == "" and fake_app.player.play_button.instate(["disabled"])
+    fake_app.discard()
     assert fake_app.status_label.cget("text") == "Nothing to discard"
+
+
+def test_a_blank_trash_folder_means_one_inside_the_recordings_folder(app_factory, tmp_path):
+    app = app_factory("[capture]\nsave_dir = recs\ntrash_dir =\n")
+    assert app.save_dir == tmp_path / "recs"
+    assert app.trash_dir == tmp_path / "recs" / "trash"
 
 
 def test_old_trash_is_purged_at_startup(app_factory, tmp_path, monkeypatch):
