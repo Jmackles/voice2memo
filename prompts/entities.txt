@@ -1,3 +1,4 @@
 List the subjects this note is about, as a JSON object with one key "items" holding an array of strings.
-Include plain nouns like "fields" or "tables" as well as names.
-Use the exact spelling from the text. Return only the JSON object.
+A subject is anything the speaker would later want to find every note that mentions it: a name, a tool, a concept, a thing being worked on.
+Leave out generic words that would match almost any note.
+Use the exact spelling from the text. Usually one to five items. Return only the JSON object.
