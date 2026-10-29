@@ -46,11 +46,18 @@ class Pane:
     text: tk.Text
     scrollbar: ttk.Scrollbar
     toggle: ttk.Button
+    header: ttk.Frame  # the title on the left; room for pane buttons on the right
+    title: ttk.Label
 
 
-def make_pane(parent: tk.Misc, font: tkfont.Font, toggle_text: str, toggle_command: Callable[[], None]) -> Pane:
-    """A word-wrapped Text with its own scrollbar, and a toggle button under the scroll arrow."""
+def make_pane(
+    parent: tk.Misc, font: tkfont.Font, title: str, toggle_text: str, toggle_command: Callable[[], None]
+) -> Pane:
+    """A titled, word-wrapped Text with its own scrollbar, and a toggle button under the scroll arrow."""
     frame = ttk.Frame(parent)
+    header = ttk.Frame(frame)
+    label = ttk.Label(header, text=title, style="PaneTitle.TLabel")
+    label.pack(side="left")
     # A 1x1 requested size lets the PanedWindow weights decide the split
     # instead of Text's 80x24 default.
     text = tk.Text(frame, wrap="word", width=1, height=1, undo=True, font=font, padx=8, pady=6)
@@ -58,12 +65,13 @@ def make_pane(parent: tk.Misc, font: tkfont.Font, toggle_text: str, toggle_comma
     text.configure(yscrollcommand=scrollbar.set)
     toggle = ttk.Button(frame, text=toggle_text, command=toggle_command, style="Toggle.TButton")
 
-    text.grid(row=0, column=0, rowspan=2, sticky="nsew")
-    scrollbar.grid(row=0, column=1, sticky="ns")
-    toggle.grid(row=1, column=1)
-    frame.rowconfigure(0, weight=1)
+    header.grid(row=0, column=0, columnspan=2, sticky="ew")
+    text.grid(row=1, column=0, rowspan=2, sticky="nsew")
+    scrollbar.grid(row=1, column=1, sticky="ns")
+    toggle.grid(row=2, column=1)
+    frame.rowconfigure(1, weight=1)
     frame.columnconfigure(0, weight=1)
-    return Pane(frame, text, scrollbar, toggle)
+    return Pane(frame, text, scrollbar, toggle, header, label)
 
 
 def replace_text(text: tk.Text, content: str) -> None:

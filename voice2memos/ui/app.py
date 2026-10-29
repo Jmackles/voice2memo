@@ -31,27 +31,29 @@ from voice2memos.errors import StageResult, VoiceMemoError
 from voice2memos.note import Memo
 from voice2memos.ui.panes import KeyLog, make_pane, replace_text
 from voice2memos.ui.platform import set_dpi_awareness
+from voice2memos.ui.player import PlayerBar
 from voice2memos.ui.settings import SettingsDialog, describe_changes
 
 log = logging.getLogger(__name__)
 
 AUDIO_TYPES = [("Audio", "*.wav *.mp3 *.m4a"), ("WAV", "*.wav"), ("MP3", "*.mp3"), ("M4A", "*.m4a")]
 HOTKEY_FIELDS = {("capture", "hotkey"), ("capture", "note_hotkey")}
-BUSY_BUTTONS = ("open_file", "record", "discard")
+BUSY_BUTTONS = ("open_file", "record")  # and the player's discard, see set_busy
 STAGES = ("transcribe", "cleanup", "entities", "tags")
 POLL_MS = 50  # how often the UI thread looks for work posted by other threads
+MIN_SIZE = (640, 400)  # the design's; the width grows to whatever the banner needs, see __init__
 
 # tkinter ships no usable icons, so Unicode symbols stand in for the PNGs the
 # design calls for: no files, no license, drawn by fonts every OS already has.
-# Moving to PNGs later only touches this table and the two button builders.
-# Each toggle shows its pane's current state: the lock is read-only, the
-# keyboard is typing, the brush is paint mode. Not 🔓, which Windows'
-# monochrome emoji font draws exactly like 🔒.
+# Moving to PNGs later only touches this table and the button builders here
+# and in player.py. Each toggle shows its pane's current state: the lock is
+# read-only, the keyboard is typing, the brush is paint mode. Not 🔓, which
+# Windows' monochrome emoji font draws exactly like 🔒.
 ICONS = {
     "open_file": "📂",
     "save": "💾",
     "record": "⏺",
-    "discard": "🗑",
+    "stop": "⏹",
     "choose_vault": "💎",
     "open_settings": "⚙",
     "open_log": "☰",
@@ -59,14 +61,19 @@ ICONS = {
     "unlocked": "⌨",
     "paint": "🖌",
     "type": "⌨",
+    "play": "▶",
+    "pause": "⏸",
+    "volume": "🔈",
+    "discard": "🗑",
+    "commit": "+",
 }
 
-# Banner buttons left to right: handler name and tooltip.
+# Banner buttons left to right: handler name and tooltip. Discard lives in
+# the player, beside the recording it throws away.
 BANNER = [
     ("open_file", "Open audio file"),
     ("save", "Save (right-click for Save as)"),
     ("record", "Record"),
-    ("discard", "Discard"),
     ("choose_vault", "Choose vault"),
     ("open_settings", "Settings"),
     ("open_log", "Log"),
@@ -121,23 +128,34 @@ class App:
         self.busy = False
         self.recording = False
         self.recorder: capture.Recorder | None = None
-        self.dirty = False
-        self.filling = False  # the program is writing the note pane, not the user
+        self.dirty = False  # the Note has changes the saved copy doesn't
+        self.note_hand_edited = False  # the user typed in the Note since the program last filled it
+        self.filling = False  # the program is writing a pane, not the user
         # Other threads never touch a widget: they put a call here and the UI thread runs it.
         self.posted: queue.Queue[tuple[Callable, tuple]] = queue.Queue()
 
         root.title(f"voice2memos {__version__}")
         root.geometry(self.config["window"]["geometry"])
-        root.minsize(640, 400)
         root.protocol("WM_DELETE_WINDOW", self.close)
         # Exceptions inside tk callbacks go here, not to sys.excepthook.
         root.report_callback_exception = self._callback_exception
         self._make_fonts_and_styles()
         self._build_banner()
         self._build_panes()
+        # No narrower than the banner, or the player or an icon gets cut off.
+        # Measured with the discard button showing, as it does for a recording.
+        self.player.discard_button.grid()
+        root.update_idletasks()
+        root.minsize(max(MIN_SIZE[0], self.banner.winfo_reqwidth()), MIN_SIZE[1])
+        self.player.discard_button.grid_remove()
+        # Both pane headers as tall as the +, so it appearing doesn't push the Transcript down.
+        for pane in (self.left, self.right):
+            pane.frame.rowconfigure(0, minsize=self.commit_button.winfo_reqheight() + 3)
+        self.player.set_volume(int(self.config["window"]["volume"]))
         self.keylog = KeyLog(root)
         self.keylog.watch(self.left.text, "transcript")
         self.keylog.watch(self.right.text, "note")
+        self.left.text.bind("<<Modified>>", self._transcript_modified, add="+")
         self.right.text.bind("<<Modified>>", self._note_modified, add="+")
         sash = self.config["window"]["sash"]
         self.sash_to_restore = int(sash) if sash else None
@@ -177,7 +195,8 @@ class App:
 
     @property
     def trash_dir(self) -> Path:
-        return config.resolve_folder(self.config["capture"]["trash_dir"], self.config_path)
+        value = self.config["capture"]["trash_dir"].strip()
+        return config.resolve_folder(value, self.config_path) if value else self.save_dir / "trash"
 
     @property
     def vault(self) -> Path | None:
@@ -203,6 +222,7 @@ class App:
                     return  # the save didn't happen; stay open
         self.keylog.flush_all()
         self.hotkeys.stop()
+        self.player.close()
         if self.recording and self.recorder is not None:
             self.recorder.stop()
         self._remember_window()
@@ -210,11 +230,11 @@ class App:
         self.root.destroy()
 
     def _remember_window(self) -> None:
-        if not self.root.winfo_ismapped():
-            return  # a hidden window has no size worth keeping
-        window = {("window", "sash"): str(self.panes.sashpos(0))}
-        if self.root.state() != "zoomed":  # keep the normal size, not the maximized one
-            window[("window", "geometry")] = f"{self.root.winfo_width()}x{self.root.winfo_height()}"
+        window = {("window", "volume"): str(self.player.volume_percent)}
+        if self.root.winfo_ismapped():  # a hidden window has no size worth keeping
+            window[("window", "sash")] = str(self.panes.sashpos(0))
+            if self.root.state() != "zoomed":  # keep the normal size, not the maximized one
+                window[("window", "geometry")] = f"{self.root.winfo_width()}x{self.root.winfo_height()}"
         if all(self.config[section][key] == value for (section, key), value in window.items()):
             return
         try:
@@ -235,15 +255,29 @@ class App:
         self.link_font.configure(underline=True)
         self.pane_font = tkfont.nametofont("TkTextFont").copy()
         self.pane_font.configure(size=11)
+        self.pane_title_font = base.copy()
+        self.pane_title_font.configure(weight="bold")
 
         style = ttk.Style(self.root)
         style.configure("Title.TLabel", font=self.title_font)
+        style.configure("PaneTitle.TLabel", font=self.pane_title_font)
         style.configure("Icon.TButton", font=self.icon_font, width=3, padding=2)
+        style.configure("Icon.TLabel", font=self.icon_font)
         style.configure("Toggle.TButton", font=self.toggle_font, width=2, padding=0)
+
+    def _clicked(self, name: str, handler: Callable[[], None]) -> Callable[[], None]:
+        """A button command that logs the click first, so the log shows it even when nothing follows."""
+
+        def command() -> None:
+            log.info("click: %s", name)
+            handler()
+
+        return command
 
     def _build_banner(self) -> None:
         banner = ttk.Frame(self.root, padding=(10, 8, 10, 0))
         banner.pack(side="top", fill="x")
+        self.banner = banner
 
         top = ttk.Frame(banner)
         top.pack(fill="x")
@@ -251,13 +285,22 @@ class App:
         icons = ttk.Frame(top)
         icons.pack(side="right")
         for name, tip in BANNER:
-            button = ttk.Button(icons, text=ICONS[name], style="Icon.TButton", command=getattr(self, name))
+            command = self._clicked(name, getattr(self, name))
+            button = ttk.Button(icons, text=ICONS[name], style="Icon.TButton", command=command)
             button.pack(side="left", padx=2)
             self.buttons[name] = button
             self.tooltips[name] = Tooltip(button, tip)
+        # Packed last, so it takes whatever width the title and icons leave. Its
+        # buttons log what they did themselves, with the position and the memo.
+        discard = self._clicked("discard", self.discard)
+        self.player = PlayerBar(top, ICONS, discard, lambda text: self.set_status(text, "error"), "Icon")
+        self.player.frame.pack(side="left", fill="x", expand=True, padx=(16, 12))
+        self.tooltips["play"] = Tooltip(self.player.play_button, "Play / pause")
+        self.tooltips["volume"] = Tooltip(self.player.volume_label, "Volume")
+        self.tooltips["discard"] = Tooltip(self.player.discard_button, "Discard this recording")
 
         self.save_menu = tk.Menu(self.root, tearoff=False)
-        self.save_menu.add_command(label="Save as…", command=self.save_as)
+        self.save_menu.add_command(label="Save as…", command=self._clicked("save_as", self.save_as))
         self.buttons["save"].bind("<Button-3>", lambda e: self.save_menu.tk_popup(e.x_root, e.y_root))
 
         status_row = ttk.Frame(banner)
@@ -271,15 +314,21 @@ class App:
     def _build_panes(self) -> None:
         panes = ttk.PanedWindow(self.root, orient="horizontal")
         panes.pack(side="top", fill="both", expand=True, padx=10, pady=(6, 10))
-        self.left = make_pane(panes, self.pane_font, ICONS["locked"], self.toggle_lock)
-        self.right = make_pane(panes, self.pane_font, ICONS["paint"], self.toggle_paint)
+        self.left = make_pane(panes, self.pane_font, "Transcript", ICONS["locked"], self.toggle_lock)
+        self.right = make_pane(panes, self.pane_font, "Note", ICONS["paint"], self.toggle_paint)
         panes.add(self.left.frame, weight=1)
         panes.add(self.right.frame, weight=1)
         self.panes = panes
         self.left.text.configure(state="disabled")
         self.left_background = self.left.text.cget("background")
-        self.tooltips["lock"] = Tooltip(self.left.toggle, "Unlock to edit the transcript")
+        self.tooltips["lock"] = Tooltip(self.left.toggle, "Unlock to edit the Transcript")
         self.tooltips["paint"] = Tooltip(self.right.toggle, "Paint mode: click words to link them")
+        # Shown only while the Transcript holds edits the Note hasn't been rebuilt from.
+        self.commit_button = ttk.Button(
+            self.left.header, text=ICONS["commit"], style="Toggle.TButton",
+            command=self._clicked("commit", self.commit_transcript),
+        )
+        self.tooltips["commit"] = Tooltip(self.commit_button, "Rebuild the Note from this Transcript (runs cleanup)")
 
     # --- status line -----------------------------------------------------
 
@@ -297,6 +346,7 @@ class App:
 
     def _retry(self, _event: tk.Event | None = None) -> None:
         if self.retry_callback is not None:
+            log.info("click: retry")
             self.retry_callback()
 
     def report(self, text: str, level: str = "error") -> None:
@@ -334,11 +384,11 @@ class App:
         if self.left_locked:
             self.left.text.configure(state="disabled", background=self.left_background)
             self.left.toggle.configure(text=ICONS["locked"])
-            self.tooltips["lock"].text = "Unlock to edit the transcript"
+            self.tooltips["lock"].text = "Unlock to edit the Transcript"
         else:
             self.left.text.configure(state="normal", background=UNLOCKED_TINT)
             self.left.toggle.configure(text=ICONS["unlocked"])
-            self.tooltips["lock"].text = "Lock the transcript"
+            self.tooltips["lock"].text = "Lock the Transcript"
         log.info("transcript pane %s", "locked" if self.left_locked else "unlocked")
 
     def toggle_paint(self) -> None:
@@ -358,7 +408,9 @@ class App:
         if self.settings_dialog is not None and self.settings_dialog.window.winfo_exists():
             self.settings_dialog.window.lift()
             return
-        self.settings_dialog = SettingsDialog(self.root, config.values(self.config), self.keylog, self.apply_settings)
+        self.settings_dialog = SettingsDialog(
+            self.root, config.values(self.config), self.keylog, self.apply_settings, self.config_path
+        )
 
     def apply_settings(self, values: dict[Field, str]) -> None:
         """Write the dialog's values into the .cfg, log what changed (secrets by name only), apply."""
@@ -384,8 +436,8 @@ class App:
 
         Each memo builds its backends from ``self.config`` when it runs, so
         model and provider changes need nothing here. What does: anything held
-        between memos. Today that is the log level; the hotkey listener joins
-        in step 6 and the cached Whisper model in step 7.
+        between memos. Today that is the log level and the hotkey listener;
+        the cached Whisper model joins in step 7.
         """
         if ("logging", "level") in changed:
             logsetup.set_level(self.config["logging"]["level"])
@@ -404,12 +456,15 @@ class App:
 
     def hotkey_pressed(self) -> None:
         if isinstance(self.root.focus_get(), tk.Text):
-            return  # typing in a pane never starts a recording
+            log.info("hotkey: push-to-talk ignored, typing in a pane")
+            return
+        log.info("hotkey: push-to-talk down")
         if not self.recording:
             self.start_recording()
 
     def hotkey_released(self) -> None:
         if self.recording:
+            log.info("hotkey: push-to-talk up")
             self.stop_recording()
 
     def push_to_note(self) -> None:
@@ -430,7 +485,10 @@ class App:
             self.set_status(e.message, "error")
             return
         self.recording = True
-        self.buttons["record"].configure(text="⏹")
+        # Silent while the mic is open, or the recording would hear the last one.
+        self.player.pause()
+        self.player.set_enabled(False)
+        self.buttons["record"].configure(text=ICONS["stop"])
         self.tooltips["record"].text = "Stop"
         self.set_status("Recording…")
 
@@ -438,6 +496,7 @@ class App:
         self.recording = False
         self.buttons["record"].configure(text=ICONS["record"])
         self.tooltips["record"].text = "Record"
+        self.player.set_enabled(True)
         frames, samplerate = self.recorder.stop()
         try:
             memo = Memo.create(self.save_dir / capture.new_stem(self.save_dir))
@@ -450,7 +509,11 @@ class App:
         self.run_pipeline(memo)
 
     def open_file(self) -> None:
-        """Pick a wav, mp3 or m4a; a copy goes into a new working folder and runs like a recording."""
+        """Pick a wav, mp3 or m4a; it becomes a memo of its own and runs like a recording.
+
+        A 16-bit WAV is copied in; anything else is decoded to one on the
+        worker. Either way the original is only ever read.
+        """
         if self.busy:
             self.set_status("Busy with the last memo", "warning")
             return
@@ -460,13 +523,10 @@ class App:
             return
         source = Path(picked)
         self._remember(("capture", "open_dir"), str(source.parent))
-        if source.suffix.lower() != ".wav":
-            # Decoding through faster-whisper's decode_audio arrives with step 7.
-            self.set_status("Only WAV files until Whisper is wired in", "warning")
-            return
         try:
-            memo = Memo.create(self.save_dir / capture.new_stem(self.save_dir))
-            shutil.copy2(source, memo.wav)  # the original is never moved or modified
+            memo = Memo.create(self.save_dir / capture.new_stem(self.save_dir), source=source)
+            if capture.is_pcm16_wav(source):
+                shutil.copy2(source, memo.wav)
         except OSError as e:
             log.warning("couldn't copy %s: %s", source, e)
             self.set_status(f"Could not open: {e.strerror or e}", "error")
@@ -478,18 +538,18 @@ class App:
 
     def run_pipeline(self, memo: Memo, start: str = "transcribe") -> None:
         """Hand the memo to the worker thread from ``start`` onward."""
+        if memo is not self.memo or self.player.playback.path != memo.wav:
+            if memo.wav.exists():
+                self.player.load(memo.wav, discardable=memo.is_recording)
+            else:
+                self.player.clear()  # an opened file still decoding; it loads when that's done
         self.memo = memo
         self.set_busy(True)
         self.run_issue = False  # set when a stage fails or warns, so "done" doesn't say Ready over it
-        self.filling = True
-        try:
-            if start == "transcribe":
-                replace_text(self.left.text, "")
-                replace_text(self.right.text, "")
+        if start == "transcribe":
+            self._fill("", "")
             self.dirty = False
             self._update_title()
-        finally:
-            self.filling = False
         self.set_status("Transcribing…" if start == "transcribe" else f"Running {start}…")
         cfg = config.new_parser()
         cfg.read_dict({s: dict(self.config[s]) for s in self.config.sections()})  # the worker gets its own copy
@@ -502,6 +562,15 @@ class App:
         post = lambda result: self.post(self._on_stage, memo, result)  # noqa: E731
         stages = STAGES[STAGES.index(start):]
         try:
+            if not memo.wav.exists() and memo.source is not None:
+                try:
+                    with logsetup.timed(log, "decode", stem):
+                        capture.decode_to_wav(memo.source, memo.wav)
+                    post(StageResult("decode", True))
+                except VoiceMemoError as e:
+                    log.warning("%s: %s: %s", stem, e.message, e.detail)
+                    post(StageResult("decode", False, e.message))
+                    return
             if "transcribe" in stages:
                 try:
                     memo.segments = transcribe.make_transcriber(cfg, config.APP_DIR).transcribe(memo.wav, stem)
@@ -558,7 +627,9 @@ class App:
             if not self.run_issue:
                 self.set_status("Ready")
             return
-        if result.stage == "transcribe" and result.ok:
+        if result.stage == "decode" and result.ok:
+            self.player.load(memo.wav, discardable=memo.is_recording)
+        elif result.stage == "transcribe" and result.ok:
             self._fill(memo.raw_text, memo.cleaned_text)
         elif result.stage == "cleanup":
             self._fill(None, memo.cleaned_text)
@@ -569,28 +640,37 @@ class App:
                 self.set_status(result.message, "warning")
             return
         self.run_issue = True
-        retry = (lambda: self.run_pipeline(memo, result.stage)) if result.stage in STAGES else None
+        # A failed decode retries from the top, which decodes again since there's still no WAV.
+        rerun = "transcribe" if result.stage == "decode" else result.stage
+        retry = (lambda: self.run_pipeline(memo, rerun)) if rerun in STAGES else None
         self.set_status(result.message, "error", retry=retry)
 
     def _fill(self, transcript: str | None, note_text: str | None) -> None:
+        """The program writing the panes. ``None`` leaves that pane as it is."""
         self.filling = True
         try:
             if transcript is not None:
                 replace_text(self.left.text, transcript)
+                self.left.text.edit_modified(False)
             if note_text is not None:
                 replace_text(self.right.text, note_text)
                 self.right.text.edit_modified(False)
-            self.dirty = False
-            self._update_title()
+                self.note_hand_edited = False
+                # A saved Note the program just rebuilt no longer matches the copy in the vault.
+                self.dirty = self.memo is not None and self.memo.saved_to is not None
+                self._update_title()
         finally:
             self.filling = False
+        self._update_commit()
 
     def set_busy(self, busy: bool) -> None:
         self.busy = busy
         for name in BUSY_BUTTONS:
             self.buttons[name].state(["disabled"] if busy else ["!disabled"])
+        self.player.set_busy(busy)
+        self.commit_button.state(["disabled"] if busy else ["!disabled"])
 
-    # --- note pane edits -----------------------------------------------------
+    # --- pane edits ------------------------------------------------------------
 
     def _note_modified(self, _event: tk.Event | None = None) -> None:
         # The event is delivered later than the edit, so a program write that
@@ -600,9 +680,63 @@ class App:
         self.right.text.edit_modified(False)  # or tk fires this exactly once
         if self.filling or self.memo is None:
             return
+        self.note_hand_edited = True
         if not self.dirty:
             self.dirty = True
             self._update_title()
+
+    def _transcript_modified(self, _event: tk.Event | None = None) -> None:
+        if not self.left.text.edit_modified():
+            return
+        self.left.text.edit_modified(False)
+        self._update_commit()
+
+    def transcript_edited(self) -> bool:
+        """The Transcript pane holds text the Note wasn't built from."""
+        text = self.left.text.get("1.0", "end-1c").strip()
+        built_from = self.memo.raw_text if self.memo is not None else ""
+        return bool(text) and text != built_from
+
+    def _update_commit(self) -> None:
+        """Show + while there are Transcript edits to send; hide it once there aren't."""
+        if self.transcript_edited():
+            if not self.commit_button.winfo_manager():
+                self.commit_button.pack(side="right")
+                log.info("transcript edited; + rebuilds the note from it")
+        elif self.commit_button.winfo_manager():
+            self.commit_button.pack_forget()
+
+    def commit_transcript(self) -> None:
+        """The +: the edited Transcript becomes the memo's segments, and the Note is rebuilt from them.
+
+        The Note is replaced, so edits typed into it are lost; it asks first
+        when there are any. The Transcript itself is left as written. With no
+        memo yet, the typed text starts one, without audio.
+        """
+        if self.busy or not self.transcript_edited():
+            return
+        if self.note_hand_edited and not messagebox.askyesno(
+            "voice2memos",
+            "The Note has edits of your own. Replace it with a fresh cleanup of the Transcript?",
+            parent=self.root,
+        ):
+            log.info("transcript not sent; the note's own edits kept")
+            return
+        text = self.left.text.get("1.0", "end-1c")
+        memo = self.memo
+        try:
+            if memo is None:
+                memo = Memo.create(self.save_dir / capture.new_stem(self.save_dir))
+            memo.keep_original()
+            memo.segments = transcribe.apply_edit(memo.segments, text)
+            memo.save_segments()
+        except OSError as e:
+            log.warning("couldn't save the edited transcript: %s", e)
+            self.set_status(f"Could not save the transcript: {e.strerror or e}", "error")
+            return
+        log.info("%s: transcript edited by hand, %d segment(s); rebuilding the note", memo.stem, len(memo.segments))
+        self.run_pipeline(memo, "cleanup")
+        self._fill(memo.raw_text, None)  # tidied to one paragraph per segment, which hides the +
 
     def _update_title(self) -> None:
         self.root.title(f"voice2memos {__version__}{' *' if self.dirty else ''}")
@@ -657,16 +791,19 @@ class App:
         self.set_status(f"Saved {path.name}")
 
     def discard(self) -> None:
-        """The working folder, and a saved note with its audio copy, move to the trash; the panes clear."""
+        """The player's 🗑: the recording's working folder, and a saved note with its
+        audio copy, move to the trash; the panes and the player clear."""
         if self.memo is None:
             self.set_status("Nothing to discard", "warning")
             return
         memo, self.memo = self.memo, None
+        self.player.clear()
         try:
             note.discard(memo, self.trash_dir, self.vault, self.config["vault"]["attachments_subdir"])
         except VoiceMemoError as e:
             log.warning("%s: %s", e.message, e.detail)
             self.memo = memo
+            self.player.load(memo.wav, discardable=memo.is_recording)
             self.set_status(e.message, "error")
             return
         self._fill("", "")

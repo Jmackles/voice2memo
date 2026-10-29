@@ -54,6 +54,41 @@ def read_wav(path: Path) -> tuple[bytes, int]:
         return src.readframes(src.getnframes()), src.getframerate()
 
 
+def is_pcm16_wav(path: Path) -> bool:
+    """A WAV the app can use as is: anything else gets decoded."""
+    try:
+        with wave.open(str(path), "rb") as src:
+            return src.getsampwidth() == 2
+    except (OSError, EOFError, wave.Error):
+        return False
+
+
+def decode_to_wav(source: Path, target: Path) -> None:
+    """Any audio PyAV reads (mp3, m4a, odd WAVs) as a mono 16-bit WAV at its own rate.
+
+    PyAV directly rather than faster-whisper's decode_audio: that one breaks on
+    PyAV 19 and imports all of faster-whisper first. Whisper resamples on load,
+    so keeping the source rate only makes playback sound better.
+    Raises CaptureError; the source is only read.
+    """
+    try:
+        import av
+    except ImportError as e:
+        raise CaptureError("Can't read that audio file", f"PyAV not installed: {e}") from e
+    try:
+        with av.open(str(source)) as container:
+            stream = container.streams.audio[0]
+            rate = stream.rate
+            resampler = av.AudioResampler(format="s16", layout="mono", rate=rate)
+            chunks = []
+            for frame in [*container.decode(stream), None]:  # None flushes the resampler
+                for out in resampler.resample(frame):
+                    chunks.append(bytes(out.planes[0])[: out.samples * 2])
+    except (IndexError, av.FFmpegError, OSError, ValueError) as e:
+        raise CaptureError("Can't read that audio file", f"{source}: {type(e).__name__}: {e}") from e
+    write_wav(target, b"".join(chunks), rate)
+
+
 # --- recorders ------------------------------------------------------------
 
 
