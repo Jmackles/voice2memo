@@ -1,2 +1,4 @@
-Choose zero to two tags for this note from this list only: {pool}
-Return only a JSON object with one key "items" holding an array of the chosen tags.
+Tags describe what kind of note this is, not what it is about.
+Choose up to four tags from this list only, and only where the note clearly fits: {pool}
+If none fit, choose none.
+Return only a JSON object with one key "items" holding an array of the chosen tags, spelled exactly as in the list.
