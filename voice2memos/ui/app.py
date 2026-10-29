@@ -42,6 +42,7 @@ OUTPUT_DEVICE = ("playback", "output_device")
 BUSY_BUTTONS = ("open_file", "record")  # and the player's discard, see set_busy
 STAGES = ("transcribe", "cleanup", "entities", "tags")
 POLL_MS = 50  # how often the UI thread looks for work posted by other threads
+STARTUP_CHECK_MS = 300  # after the window is up, so a slow answer never holds it back
 MIN_SIZE = (640, 400)  # the design's; the width grows to whatever the banner needs, see __init__
 
 # tkinter ships no usable icons, so Unicode symbols stand in for the PNGs the
@@ -177,6 +178,30 @@ class App:
         self.hotkeys.bind(self.config["capture"]["hotkey"], self.config["capture"]["note_hotkey"])
         note.purge_trash(self.trash_dir)
         self._drain_posted()
+        self.check_timer = root.after(STARTUP_CHECK_MS, self.check_models)
+
+    def check_models(self) -> None:
+        """Is Ollama up, with the models the config names? Says so in the status line if not.
+
+        Only Ollama: it's local, so asking costs milliseconds and sends nothing
+        anywhere. The API providers are checked when Settings lists their models.
+        """
+        wanted = sorted({
+            self.config[section]["model"].strip()
+            for section in ("cleanup", "entities")
+            if self.config[section]["provider"].strip() == "ollama"
+        })
+        if not wanted:
+            return
+        names, problem = cleanup.available_models("ollama", timeout=2)
+        if problem:
+            self.set_status(f"{problem.split('.')[0]}; cleanup will show the raw transcript", "warning")
+            return
+        missing = [m for m in wanted if not any(cleanup.same_model(m, n) for n in names)]
+        if missing:
+            self.set_status(f"Ollama has no {', '.join(missing)}; pick an installed model in Settings > Models", "warning")
+        else:
+            log.info("ollama has %s", ", ".join(wanted))
 
     def post(self, func: Callable, *args) -> None:
         """Run ``func(*args)`` on the UI thread soon. Safe from any thread."""
@@ -231,6 +256,7 @@ class App:
             self.recorder.stop()
         self._remember_window()
         self.root.after_cancel(self.drain_timer)
+        self.root.after_cancel(self.check_timer)
         self.root.destroy()
 
     def _remember_window(self) -> None:
