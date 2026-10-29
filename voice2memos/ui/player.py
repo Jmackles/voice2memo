@@ -24,6 +24,7 @@ from tkinter import ttk
 import numpy as np
 
 from voice2memos import capture
+from voice2memos.transcribe import format_time  # noqa: F401  (the bar's clock; tests import it from here too)
 
 log = logging.getLogger(__name__)
 
@@ -35,11 +36,6 @@ def open_output_stream(rate: int, channels: int, callback: Callable, device: int
     import sounddevice as sd
 
     return sd.RawOutputStream(samplerate=rate, channels=channels, dtype="int16", callback=callback, device=device)
-
-
-def format_time(seconds: float) -> str:
-    seconds = int(seconds)
-    return f"{seconds // 60}:{seconds % 60:02d}"
 
 
 def click_to_jump(scale: ttk.Scale, on_press: Callable[[], None], on_release: Callable[[float], None]) -> None:

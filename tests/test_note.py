@@ -65,12 +65,12 @@ def test_render_matches_the_expected_note(sample, fixtures_dir):
 def test_render_uses_the_edited_body_paragraph_per_segment(sample):
     body = "First edited.\n\nSecond, about Bookinnit."
     text = note.render(sample, body)
-    assert "First edited. ^sample-0\n\nSecond, about [[Bookinnit]]. ^sample-1\n" in text
+    assert "**0:00** First edited. ^sample-0\n\n**0:03** Second, about [[Bookinnit]]. ^sample-1\n" in text
 
 
 def test_render_keeps_an_edited_body_whole_when_paragraphs_do_not_pair_up(sample):
     text = note.render(sample, "One paragraph only about tables.")
-    assert "One paragraph only about [[tables]]. ^sample-0\n" in text
+    assert "**0:00** One paragraph only about [[tables]]. ^sample-0\n" in text
     assert "^sample-1" not in text
 
 
@@ -79,6 +79,15 @@ def test_render_without_audio_or_segments_leaves_those_parts_out(tmp_path):
     memo.created = SAMPLE_DATE
     text = note.render(memo, "Just typed.")
     assert text == "---\ndate: 2026-10-28T17:26:00-04:00\ntags: []\n---\n# typed\n\nJust typed. ^typed-0\n"
+
+
+def test_a_typed_note_has_no_time_stamps_but_keeps_its_original_words(tmp_path):
+    memo = Memo.create(tmp_path / "typed")
+    memo.created = SAMPLE_DATE
+    memo.segments = [Segment(0, 0.0, 0.0, "typed it", "Typed it.")]
+    text = note.render(memo)
+    assert text.endswith("# typed\n\nTyped it. ^typed-0\n\n---\n\n> [!quote]- Original\n> typed it\n")
+    assert "**" not in text and "![[" not in text
 
 
 def test_rejected_tags_stay_out_of_the_frontmatter(sample):

@@ -126,7 +126,7 @@ def wrapper(**overrides) -> WhisperTranscriber:
 
 
 def test_whisper_segments_come_out_rounded_with_their_words(fixtures_dir, caplog):
-    w = wrapper(glossary="Bookinnit\n\n  Oakwillow  \n")
+    w = wrapper(glossary="Bookinnit\n\n  Oakwillow  \n", paragraph_seconds=0)
     with caplog.at_level(logging.INFO):
         segments = w.transcribe(fixtures_dir / "sample" / "memo.wav", "stem")
     assert [(s.index, s.start, s.end, s.text, s.cleaned) for s in segments] == [
@@ -140,6 +140,35 @@ def test_whisper_segments_come_out_rounded_with_their_words(fixtures_dir, caplog
     assert call["initial_prompt"] == "Bookinnit, Oakwillow"
     assert w.loaded_on == ("cuda", "float16") and w.note == ""
     assert "stem: 2.4s of audio on cuda float16" in caplog.messages
+
+
+def test_whisper_sentences_are_grouped_into_paragraphs_by_default(fixtures_dir, caplog):
+    with caplog.at_level(logging.INFO):
+        [paragraph] = wrapper().transcribe(fixtures_dir / "sample" / "memo.wav", "stem")
+    assert (paragraph.index, paragraph.start, paragraph.end, paragraph.text) == (0, 0.0, 2.4, " hello there again")
+    assert [w["word"] for w in paragraph.words] == [" hello", " there"]
+    assert "stem: 2 whisper segment(s) in 1 paragraph(s)" in caplog.messages
+
+
+def test_group_segments_breaks_at_a_pause_or_the_paragraph_length():
+    one = Segment(0, 0.0, 10.0, " one", words=[{"word": " one", "start": 0.0, "end": 10.0}])
+    two = Segment(1, 10.5, 25.0, " two ", words=[{"word": " two", "start": 10.5, "end": 25.0}])
+    segments = [
+        one,
+        two,
+        Segment(2, 25.2, 32.0, " three"),  # would take the paragraph past 30 s
+        Segment(3, 35.0, 40.0, " four"),  # after a 3 s pause
+        Segment(4, 40.1, 45.0, " five"),
+    ]
+    grouped = transcribe.group_segments(segments, 30)
+    assert [(s.index, s.start, s.end, s.text) for s in grouped] == [
+        (0, 0.0, 25.0, " one two"),
+        (1, 25.2, 32.0, " three"),
+        (2, 35.0, 45.0, " four five"),
+    ]
+    assert grouped[0].words == one.words + two.words
+    assert [s.text for s in segments] == [" one", " two ", " three", " four", " five"]  # the input is left alone
+    assert transcribe.group_segments(segments, 0) is segments
 
 
 def test_the_model_is_loaded_once_and_shared(fixtures_dir):
@@ -188,6 +217,8 @@ def test_make_transcriber_builds_the_real_one_from_the_config():
     cfg = config.new_parser()
     cfg["whisper"]["model_size"] = "medium"
     cfg["whisper"]["glossary"] = "Bookinnit"
+    cfg["note"]["paragraph_seconds"] = "45"
     w = make_transcriber(cfg, config.APP_DIR)
     assert isinstance(w, WhisperTranscriber)
     assert (w.model_size, w.device, w.compute_type, w.language, w.glossary) == ("medium", "auto", "auto", "en", "Bookinnit")
+    assert w.paragraph_seconds == 45

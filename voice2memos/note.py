@@ -22,12 +22,22 @@ Note file layout, written here and nowhere else::
     ---
     # 20261027-093400
 
-    <cleaned text, one paragraph per segment ending in ^stem-N, links in [[ ]]>
+    **0:00** <cleaned text, one paragraph per segment, links in [[ ]]> ^stem-0
+
+    **0:31** <the next paragraph> ^stem-1
+
+    ---
 
     > [!quote]- Original
-    > <raw transcript, one callout line per segment>
+    > **0:00** <raw transcript, one callout line per segment>
+    > **0:31** <...>
 
     ![[20261027-093400.wav]]
+
+A segment is a paragraph of speech (see ``transcribe.group_segments``). The
+bold stamp is where it starts in the audio, left out of a typed note. The
+``^stem-N`` block id lets another note embed or link one paragraph; Obsidian
+hides it in reading view.
 
 The note is written to a temp file beside the target and ``os.replace``d into
 place, so a sync client never sees a half-written file.
@@ -51,7 +61,7 @@ from urllib.parse import quote
 from voice2memos.capture import WAV_NAME
 from voice2memos.cleanup import CLEANED_FILE, ENTITIES_FILE, TAGS_FILE
 from voice2memos.errors import SaveError
-from voice2memos.transcribe import SEGMENTS_FILE, Segment, display_text, load_segments, save_segments
+from voice2memos.transcribe import SEGMENTS_FILE, Segment, display_text, format_time, load_segments, save_segments
 
 log = logging.getLogger(__name__)
 
@@ -162,9 +172,12 @@ class Memo:
 def render(memo: Memo, body: str | None = None) -> str:
     """The note as markdown. ``body`` is the note pane's text when the user edited it.
 
-    One paragraph per segment with a block id; when the body has as many
-    paragraphs as there are segments they pair up, otherwise the whole body is
-    one paragraph. Links wrap the first occurrence of each entity.
+    One paragraph per segment, each stamped with where it starts in the audio
+    and ending in a block id; when the body has as many paragraphs as there
+    are segments they pair up, otherwise the whole body is one paragraph from
+    the first segment's start. Links wrap the first occurrence of each entity.
+    A rule closes the body; the footer under it holds the original words,
+    collapsed, and the audio.
     """
     paragraphs = [p.strip() for p in (body if body is not None else memo.cleaned_text).split("\n\n") if p.strip()]
     if len(paragraphs) != len(memo.segments):
@@ -175,12 +188,22 @@ def render(memo: Memo, body: str | None = None) -> str:
         lines.append(f"audio: {memo.stem}.wav")
     lines += [f"tags: [{', '.join(t for t in memo.tags if t not in memo.rejected_tags)}]", "---", f"# {memo.stem}", ""]
     for index, paragraph in enumerate(linked):
-        lines += [f"{paragraph} ^{memo.stem}-{index}", ""]
+        lines += [f"{_stamp(memo, index)}{paragraph} ^{memo.stem}-{index}", ""]
+    if memo.segments or memo.has_audio:
+        lines += ["---", ""]
     if memo.segments:
-        lines += ["> [!quote]- Original"] + [f"> {s.text.strip()}" for s in memo.segments] + [""]
+        lines += ["> [!quote]- Original"] + [f"> {_stamp(memo, s.index)}{s.text.strip()}" for s in memo.segments] + [""]
     if memo.has_audio:
         lines += [f"![[{memo.stem}.wav]]", ""]
     return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def _stamp(memo: Memo, index: int) -> str:
+    """Where paragraph ``index`` starts in the audio, as **m:ss**; nothing for a typed note."""
+    if not memo.has_audio or not memo.segments:
+        return ""
+    segment = memo.segments[min(index, len(memo.segments) - 1)]
+    return f"**{format_time(segment.start)}** "
 
 
 LINK = re.compile(r"\[\[([^\]|]*)(?:\|[^\]]*)?\]\]")

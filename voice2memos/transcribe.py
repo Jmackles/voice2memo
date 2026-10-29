@@ -35,6 +35,9 @@ log = logging.getLogger(__name__)
 
 SEGMENTS_FILE = "segments.json"
 
+# A gap in the speech this long starts a new paragraph, however short the one before.
+PAUSE_SECONDS = 2.0
+
 
 @dataclass
 class Segment:
@@ -59,6 +62,35 @@ def joined_text(segments: list[Segment], cleaned: bool = False) -> str:
 def display_text(segments: list[Segment]) -> str:
     """The raw transcript as the Transcript pane shows it: one paragraph per segment."""
     return "\n\n".join(s.text.strip() for s in segments)
+
+
+def format_time(seconds: float) -> str:
+    """Seconds as m:ss, the way the player shows a position and the note stamps a paragraph."""
+    seconds = int(seconds)
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def group_segments(segments: list[Segment], paragraph_seconds: float, pause_seconds: float = PAUSE_SECONDS) -> list[Segment]:
+    """Whisper's sentence-sized segments joined into paragraph-sized ones.
+
+    A segment joins the paragraph before it unless that would run the
+    paragraph past ``paragraph_seconds`` or the gap before it is a pause of
+    ``pause_seconds`` or more. Word timestamps come along, so a clip can still
+    be cut inside a paragraph. ``paragraph_seconds`` of 0 keeps Whisper's own.
+    """
+    if paragraph_seconds <= 0:
+        return segments
+    grouped: list[Segment] = []
+    for s in segments:
+        if grouped:
+            last = grouped[-1]
+            if s.start - last.end < pause_seconds and s.end - last.start <= paragraph_seconds:
+                last.end = s.end
+                last.text = f"{last.text.rstrip()} {s.text.strip()}"
+                last.words = last.words + list(s.words)
+                continue
+        grouped.append(Segment(len(grouped), s.start, s.end, s.text, words=list(s.words)))
+    return grouped
 
 
 def apply_edit(segments: list[Segment], text: str) -> list[Segment]:
@@ -203,16 +235,21 @@ class WhisperTranscriber(Transcriber):
     ``load`` picks the device: with ``device = auto`` it tries CUDA and falls
     back to CPU int8, setting ``note`` ("GPU unavailable, using CPU") for the
     status line. Loading is slow, so the app warms it up on a thread at startup.
+    Whisper's sentence-sized segments come out grouped into paragraphs of up to
+    ``paragraph_seconds`` (see ``group_segments``).
     """
 
     name = "whisper"
 
-    def __init__(self, model_size: str, device: str, compute_type: str, language: str, glossary: str) -> None:
+    def __init__(
+        self, model_size: str, device: str, compute_type: str, language: str, glossary: str, paragraph_seconds: float = 30
+    ) -> None:
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
         self.language = language
         self.glossary = glossary
+        self.paragraph_seconds = paragraph_seconds
         self.note = ""
         self.model = None
         self.loaded_on: tuple[str, str] | None = None
@@ -269,7 +306,9 @@ class WhisperTranscriber(Transcriber):
         log.info("%s: %.1fs of audio on %s", self.stem, info.duration, " ".join(self.loaded_on or ()))
         if not segments:
             raise TranscribeError("Nothing heard in the recording", f"{info.duration:.1f}s of audio, no speech found")
-        return segments
+        paragraphs = group_segments(segments, self.paragraph_seconds)
+        log.info("%s: %d whisper segment(s) in %d paragraph(s)", self.stem, len(segments), len(paragraphs))
+        return paragraphs
 
 
 def whisper_models() -> tuple[list[str], str]:
@@ -311,5 +350,10 @@ def make_transcriber(cfg, repo_dir: Path) -> Transcriber:
             delay=float(fake["delay"] or 0),
         )
     return WhisperTranscriber(
-        whisper["model_size"], whisper["device"], whisper["compute_type"], whisper["language"], whisper["glossary"]
+        whisper["model_size"],
+        whisper["device"],
+        whisper["compute_type"],
+        whisper["language"],
+        whisper["glossary"],
+        paragraph_seconds=float(cfg["note"]["paragraph_seconds"]),
     )

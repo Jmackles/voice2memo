@@ -1,7 +1,7 @@
 """Config: ``.cfg`` load, defaults dict, apply.
 
 Sections mirror ``voice2memos.example.cfg``: capture, whisper, cleanup,
-entities, tags, vault, keys, playback, logging, window, fake. The defaults dict is the single
+entities, tags, note, vault, keys, playback, logging, window, fake. The defaults dict is the single
 source of truth for shipped values; the installer writes the initial .cfg from it.
 
 Notes from the design doc:
@@ -68,6 +68,9 @@ DEFAULTS: dict[str, dict[str, str]] = {
         "timeout": "30",
     },
     "tags": {"pool": "idea\nquestion\nrant\nhomework\nbookinnit\ntodo"},
+    # Speech is grouped into paragraphs of up to this many seconds, broken sooner
+    # at a pause; 0 keeps Whisper's own sentence-sized segments.
+    "note": {"paragraph_seconds": "30"},
     "vault": {"path": "", "attachments_subdir": "attachments"},
     "keys": {"openai": "", "anthropic": ""},
     "logging": {"level": "INFO"},
@@ -111,6 +114,7 @@ CHECKS: dict[Field, tuple[Callable[[str], bool], str]] = {
     ("entities", "temperature"): (_number(0, 1), "a number from 0 to 1"),
     ("cleanup", "timeout"): (_number(1), "a number of seconds"),
     ("entities", "timeout"): (_number(1), "a number of seconds"),
+    ("note", "paragraph_seconds"): (_number(0), "a number of seconds, 0 for Whisper's own segments"),
     ("logging", "level"): (lambda v: v.upper() in LOG_LEVELS, ", ".join(LOG_LEVELS)),
     ("window", "geometry"): (lambda v: re.fullmatch(r"\d+x\d+", v) is not None, "width x height, like 960x600"),
     ("window", "sash"): (lambda v: v == "" or v.isdigit(), "blank or a number of pixels"),

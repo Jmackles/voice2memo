@@ -212,6 +212,11 @@ class SettingsDialog:
         self._choice(whisper, WHISPER_MODEL, "Whisper model", [])
         self.model_notes["whisper"] = self._note(whisper)
         self._choice(whisper, ("whisper", "device"), "Device", DEVICES)
+        paragraphs = self._group(tab, "Note")
+        self._entry(paragraphs, ("note", "paragraph_seconds"), "Paragraph length")
+        self._note(paragraphs).configure(
+            text="Seconds of speech per paragraph at most; a pause breaks one sooner. 0 keeps Whisper's own sentences."
+        )
         return tab
 
     def _audio_tab(self, notebook: ttk.Notebook) -> ttk.Frame:
