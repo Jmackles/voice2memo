@@ -1,15 +1,18 @@
-"""Stems, WAV writing, the fake recorder, and the hotkey listener's binding rules."""
+"""Stems, WAV writing, recorders, audio devices, and the hotkey listener's binding rules."""
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime
 
+import numpy as np
 import pytest
 
 from voice2memos import capture, config
 from voice2memos.capture import FakeRecorder, HotkeyListener, MicRecorder, make_recorder
 from voice2memos.errors import CaptureError
+
+from .conftest import FakeInputStream
 
 WHEN = datetime(2026, 10, 28, 17, 26, 0)
 
@@ -52,7 +55,7 @@ def test_fake_recorder_can_fail():
 def test_make_recorder_follows_the_config(fixtures_dir):
     cfg = config.new_parser()
     mic = make_recorder(cfg, config.APP_DIR)
-    assert isinstance(mic, MicRecorder) and mic.device is None
+    assert isinstance(mic, MicRecorder) and mic.device == ""
     cfg["capture"]["input_device"] = "Some Mic"
     assert make_recorder(cfg, config.APP_DIR).device == "Some Mic"
     cfg["capture"]["input_device"] = "fake"
@@ -62,9 +65,78 @@ def test_make_recorder_follows_the_config(fixtures_dir):
     assert isinstance(fake, FakeRecorder) and fake.fixture == fixtures_dir / "sample" and fake.fail
 
 
-def test_a_bad_microphone_name_is_a_capture_error():
+# --- devices -----------------------------------------------------------------
+
+
+def test_each_device_is_listed_once_by_its_whole_name():
+    assert capture.list_devices("input") == ["Microphone (USB Headset)"]
+    assert capture.list_devices("output") == [
+        "Speakers (Realtek(R) Audio)",
+        "PHL 346E2C (NVIDIA High Definition Audio)",  # MME cut it short; DirectSound had it whole
+        "Headphones (USB Headset)",
+    ]
+
+
+def test_the_system_defaults_by_name():
+    assert capture.default_device_name("input") == "Microphone (USB Headset)"
+    assert capture.default_device_name("output") == "Speakers (Realtek(R) Audio)"
+
+
+def test_no_default_device_is_a_blank_name(no_sound):
+    no_sound.table.default["input"] = None
+    assert capture.default_device_name("input") == ""
+
+
+def test_a_name_resolves_to_its_device_on_the_default_host_api():
+    assert capture.resolve_device("", "output") == (None, "")
+    assert capture.resolve_device("Headphones (USB Headset)", "output") == (5, "")
+    assert capture.resolve_device("PHL 346E2C (NVIDIA High Definition Audio)", "output") == (4, "")
+
+
+def test_a_device_that_is_not_connected_falls_back_to_the_default(caplog):
+    with caplog.at_level(logging.WARNING):
+        assert capture.resolve_device("Gone Headset", "input") == (None, "Gone Headset isn't connected, using the default")
+    assert "input device 'Gone Headset' isn't connected" in caplog.text
+
+
+def test_the_microphone_opens_the_chosen_device_at_its_own_rate():
+    mic = MicRecorder("Microphone (USB Headset)")
+    mic.start()
+    [stream] = FakeInputStream.opened
+    assert (stream.device, stream.rate, stream.started) == (1, 48000, True)
+    assert mic.note == ""
+    stream.feed(bytes(range(10)))
+    assert mic.stop() == (bytes(range(10)), 48000)
+    assert stream.closed
+
+
+def test_a_missing_microphone_records_from_the_default_with_a_note():
+    mic = MicRecorder("Gone Headset")
+    mic.start()
+    assert FakeInputStream.opened[0].device is None
+    assert mic.note == "Gone Headset isn't connected, using the default"
+
+
+def test_no_microphone_at_all_is_a_capture_error(no_sound):
+    no_sound.table.default["input"] = None
+    with pytest.raises(CaptureError, match="No microphone found"):
+        MicRecorder().start()
+
+
+def test_a_microphone_that_will_not_open_is_a_capture_error():
+    FakeInputStream.fail = True
     with pytest.raises(CaptureError, match="Microphone unavailable"):
-        MicRecorder("no such device, surely").start()
+        MicRecorder().start()
+
+
+@pytest.mark.parametrize("amplitude, level", [(0, 0.0), (32767, 1.0), (328, 1 / 3)])
+def test_the_level_meter_reads_decibels(amplitude, level):
+    meter = capture.LevelMeter("")
+    assert meter.start() == ""
+    FakeInputStream.opened[0].feed(np.full(1600, amplitude, "<i2").tobytes())
+    assert meter.level == pytest.approx(level, abs=0.01)
+    meter.stop()
+    assert meter.level == 0 and FakeInputStream.opened[0].closed
 
 
 @pytest.fixture
