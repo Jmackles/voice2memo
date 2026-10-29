@@ -130,6 +130,8 @@ class App:
         self.recorder: capture.Recorder | None = None
         self.dirty = False  # the Note has changes the saved copy doesn't
         self.note_hand_edited = False  # the user typed in the Note since the program last filled it
+        self.mirror_declined = False  # the user kept those edits rather than let the Note follow the Transcript
+        self.note_built_from = ""  # the Transcript text the Note's cleanup ran (or is running) on
         self.filling = False  # the program is writing a pane, not the user
         # Other threads never touch a widget: they put a call here and the UI thread runs it.
         self.posted: queue.Queue[tuple[Callable, tuple]] = queue.Queue()
@@ -328,7 +330,7 @@ class App:
             self.left.header, text=ICONS["commit"], style="Toggle.TButton",
             command=self._clicked("commit", self.commit_transcript),
         )
-        self.tooltips["commit"] = Tooltip(self.commit_button, "Rebuild the Note from this Transcript (runs cleanup)")
+        self.tooltips["commit"] = Tooltip(self.commit_button, "Clean up the Note from this Transcript, as if just transcribed")
 
     # --- status line -----------------------------------------------------
 
@@ -652,10 +654,12 @@ class App:
             if transcript is not None:
                 replace_text(self.left.text, transcript)
                 self.left.text.edit_modified(False)
+                # Whatever the program puts in the Transcript, the Note is (being) built from.
+                self.note_built_from = transcript
             if note_text is not None:
                 replace_text(self.right.text, note_text)
                 self.right.text.edit_modified(False)
-                self.note_hand_edited = False
+                self.note_hand_edited = self.mirror_declined = False
                 # A saved Note the program just rebuilt no longer matches the copy in the vault.
                 self.dirty = self.memo is not None and self.memo.saved_to is not None
                 self._update_title()
@@ -690,28 +694,60 @@ class App:
             return
         self.left.text.edit_modified(False)
         self._update_commit()
+        self._mirror_transcript()
 
     def transcript_edited(self) -> bool:
         """The Transcript pane holds text the Note wasn't built from."""
         text = self.left.text.get("1.0", "end-1c").strip()
-        built_from = self.memo.raw_text if self.memo is not None else ""
-        return bool(text) and text != built_from
+        return bool(text) and text != self.note_built_from.strip()
+
+    def _mirror_transcript(self) -> None:
+        """The Note follows the Transcript as it's typed, as it would look straight after transcription.
+
+        While the Transcript differs from what the Note was built from, the
+        Note shows it as written; typed back to that, the Note gets its
+        cleaned text back. Edits typed into the Note are only overwritten
+        after asking, once.
+        """
+        if self.note_hand_edited:
+            if self.mirror_declined:
+                return
+            if not messagebox.askyesno(
+                "voice2memos",
+                "The Note has edits of your own. Let it follow the Transcript, replacing them?",
+                parent=self.root,
+            ):
+                self.mirror_declined = True
+                log.info("note kept as edited; it stops following the transcript")
+                return
+            log.info("note's own edits replaced; it follows the transcript")
+        if self.transcript_edited():
+            text = self.left.text.get("1.0", "end-1c")
+        else:
+            text = self.memo.cleaned_text if self.memo is not None else ""
+        if text == self.right.text.get("1.0", "end-1c"):
+            return
+        top = self.right.text.yview()[0]  # typing far down the Transcript shouldn't scroll the Note to the top
+        self._fill(None, text)
+        self.right.text.yview_moveto(top)
 
     def _update_commit(self) -> None:
-        """Show + while there are Transcript edits to send; hide it once there aren't."""
+        """Show + while there are Transcript edits to clean up; hide it once there aren't."""
         if self.transcript_edited():
             if not self.commit_button.winfo_manager():
                 self.commit_button.pack(side="right")
-                log.info("transcript edited; + rebuilds the note from it")
+                log.info("transcript edited; the note follows it, + cleans it up")
         elif self.commit_button.winfo_manager():
             self.commit_button.pack_forget()
 
     def commit_transcript(self) -> None:
-        """The +: the edited Transcript becomes the memo's segments, and the Note is rebuilt from them.
+        """The +: the rest of the pipeline, as if the edited Transcript had just been transcribed.
 
-        The Note is replaced, so edits typed into it are lost; it asks first
-        when there are any. The Transcript itself is left as written. With no
-        memo yet, the typed text starts one, without audio.
+        The Transcript becomes the memo's segments, and cleanup, entities and
+        tags run on them, filling the Note. Saving it stays the Save button's
+        job, as for any memo. The Note is replaced, so if it still holds edits
+        of its own (the user declined to let it follow), it asks first. With
+        no memo yet, the typed text starts one, without audio.
         """
         if self.busy or not self.transcript_edited():
             return
@@ -734,9 +770,9 @@ class App:
             log.warning("couldn't save the edited transcript: %s", e)
             self.set_status(f"Could not save the transcript: {e.strerror or e}", "error")
             return
-        log.info("%s: transcript edited by hand, %d segment(s); rebuilding the note", memo.stem, len(memo.segments))
+        log.info("%s: transcript edited by hand, %d segment(s); cleaning it up", memo.stem, len(memo.segments))
         self.run_pipeline(memo, "cleanup")
-        self._fill(memo.raw_text, None)  # tidied to one paragraph per segment, which hides the +
+        self._fill(memo.raw_text, memo.raw_text)  # tidied to a paragraph per segment, which hides the +
 
     def _update_title(self) -> None:
         self.root.title(f"voice2memos {__version__}{' *' if self.dirty else ''}")

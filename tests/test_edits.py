@@ -39,16 +39,27 @@ def test_the_panes_are_titled(app):
     assert app.right.title.cget("text") == "Note"
 
 
-def test_plus_shows_only_while_the_transcript_is_edited(recorded, caplog):
+def test_the_note_follows_the_transcript_as_it_is_typed(recorded):
+    app = recorded
+    type_into(app, "left", " really")
+    assert pane(app, "right") == EXPECTED_RAW + " really"
+    type_into(app, "left", "\n\nA new thought")
+    assert pane(app, "right") == EXPECTED_RAW + " really\n\nA new thought"
+    assert pane(app, "left") == pane(app, "right")
+    assert not app.note_hand_edited  # the program wrote it, not the user
+
+
+def test_typing_back_to_the_original_gives_the_note_its_cleanup_back(recorded, caplog):
     app = recorded
     assert app.commit_button.winfo_manager() == ""
     with caplog.at_level(logging.INFO):
         type_into(app, "left", " really")
     assert app.commit_button.winfo_manager() == "pack"
-    assert "transcript edited; + rebuilds the note from it" in caplog.messages
+    assert "transcript edited; the note follows it, + cleans it up" in caplog.messages
     app.left.text.delete("end-8c", "end-1c")  # typed back to what it was
     app.root.update()
     assert pane(app, "left") == EXPECTED_RAW
+    assert pane(app, "right") == EXPECTED_NOTE
     assert app.commit_button.winfo_manager() == ""
 
 
@@ -71,7 +82,7 @@ def test_plus_rebuilds_the_note_and_keeps_the_transcript_as_written(recorded, fi
     original = json.loads((memo.folder / "segments.original.json").read_text(encoding="utf-8"))
     assert original[1]["text"].strip() == "like maybe Bookinnit should just have fields instead of tables you know"
     assert "click: commit" in caplog.messages
-    assert f"{memo.stem}: transcript edited by hand, 2 segment(s); rebuilding the note" in caplog.messages
+    assert f"{memo.stem}: transcript edited by hand, 2 segment(s); cleaning it up" in caplog.messages
     assert f"{memo.stem}: transcribe (fake whisper) start" not in caplog.text  # only cleanup onward
 
 
@@ -83,22 +94,37 @@ def test_editing_the_note_never_touches_the_transcript(recorded):
     assert app.note_hand_edited and app.dirty
 
 
-def test_plus_asks_before_replacing_note_edits(recorded, finish, monkeypatch):
+def test_note_edits_are_kept_if_the_user_says_so_asked_once(recorded, finish, monkeypatch):
     app = recorded
     type_into(app, "right", " Mine.")
-    type_into(app, "left", " really")
     asked = []
     monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *a, **k: asked.append(a) or False)
-    app.commit_button.invoke()
-    assert asked and not app.busy
+    type_into(app, "left", " really")
+    type_into(app, "left", " truly")
+    assert len(asked) == 1  # not on every key
     assert pane(app, "right") == EXPECTED_NOTE + " Mine."
-    assert app.commit_button.winfo_manager() == "pack"  # the edit is still there to send
+    assert app.commit_button.winfo_manager() == "pack"  # the edit is still there to clean up
+
+    app.commit_button.invoke()  # + would replace those edits too, so it asks as well
+    assert len(asked) == 2 and not app.busy
+    assert pane(app, "right") == EXPECTED_NOTE + " Mine."
 
     monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *a, **k: True)
     app.commit_button.invoke()
     finish(app)
     assert not pane(app, "right").endswith("Mine.")
     assert not app.note_hand_edited
+
+
+def test_note_edits_give_way_to_the_transcript_if_the_user_says_so(recorded, monkeypatch):
+    app = recorded
+    type_into(app, "right", " Mine.")
+    monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *a, **k: True)
+    type_into(app, "left", " really")
+    assert pane(app, "right") == EXPECTED_RAW + " really"
+    monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *a, **k: pytest.fail("asked again"))
+    type_into(app, "left", " truly")
+    assert pane(app, "right") == EXPECTED_RAW + " really truly"
 
 
 def test_a_saved_note_rebuilt_from_the_transcript_needs_saving_again(recorded, finish, monkeypatch, vault):
@@ -129,6 +155,7 @@ def test_typing_a_transcript_from_scratch_starts_a_memo_without_audio(fake_app, 
     app = fake_app
     app.toggle_lock()
     type_into(app, "left", "Remember the milk.")
+    assert pane(app, "right") == "Remember the milk." and app.memo is None  # shown at once, no memo yet
     app.commit_button.invoke()
     finish(app)
     assert app.memo is not None and not app.memo.has_audio

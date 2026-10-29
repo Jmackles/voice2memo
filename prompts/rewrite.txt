@@ -5,26 +5,26 @@ Do not summarize. Do not add anything. Do not change the meaning.
 Return only the rewritten text.
 
 Example input:
-<placeholder: raw transcript 1>
+Ok so it looks like python has something called imports which lets you bring in other libraries which are like themselves their own external python repos sortof
 Example output:
-<placeholder: cleaned text 1>
+Python has something called imports, which let you bring in other libraries. Those libraries are sort of their own external Python repos.
 
 Example input:
-<placeholder: raw transcript 2>
+um so in database class today we kinda figured out that when you hit a wall designing the tables like when something doesn't fit, you either need more fields or you need more tables, that's it, that's the whole thing, oh and I should ask about whether the data dictionary needs the foreign keys listed on both sides or just the one
 Example output:
-<placeholder: cleaned text 2>
+In database class today we figured out that when you hit a wall designing the tables, when something doesn't fit, you either need more fields or you need more tables. That's the whole thing. I should ask whether the data dictionary needs the foreign keys listed on both sides or just the one.
 
 Example input:
-<placeholder: raw transcript 3>
+so for Bookinnit I was thinking the engine service bookings should be, no wait, the boat rentals should be the parent and the service bookings hang off the boat not off the customer because the customer can change but the boat is the boat
 Example output:
-<placeholder: cleaned text 3>
+For Bookinnit I was thinking the boat rentals should be the parent, and the service bookings should hang off the boat, not off the customer, because the customer can change but the boat is the boat.
 
 Example input:
-<placeholder: raw transcript 4>
+java is weird coming from C because like everything is a class and you can't just have a function sitting there by itself it has to live inside something and also the semicolons are the same which is nice but the indentation doesn't matter the same way python does it, I keep expecting it to care and it doesn't
 Example output:
-<placeholder: cleaned text 4>
+Java is weird coming from C because everything is a class. You can't just have a function sitting there by itself; it has to live inside something. The semicolons are the same, which is nice, but the indentation doesn't matter the way it does in Python. I keep expecting it to care and it doesn't.
 
 Example input:
-<placeholder: raw transcript 5>
+note to self the push to talk key should probably not be anything I'd type in a game, like F9 is fine, ctrl 1 is maybe bad, and also I need to remember to actually test the thing where the microphone doesn't open at sixteen k because the doc says some mics won't do that and I just assumed mine would
 Example output:
-<placeholder: cleaned text 5>
+Note to self: the push-to-talk key should probably not be anything I'd type in a game. F9 is fine; Ctrl+1 is maybe bad. I also need to remember to actually test the case where the microphone doesn't open at 16 kHz, because the doc says some mics won't do that and I just assumed mine would.
