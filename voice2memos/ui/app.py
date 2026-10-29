@@ -38,6 +38,7 @@ log = logging.getLogger(__name__)
 
 AUDIO_TYPES = [("Audio", "*.wav *.mp3 *.m4a"), ("WAV", "*.wav"), ("MP3", "*.mp3"), ("M4A", "*.m4a")]
 HOTKEY_FIELDS = {("capture", "hotkey"), ("capture", "note_hotkey")}
+OUTPUT_DEVICE = ("playback", "output_device")
 BUSY_BUTTONS = ("open_file", "record")  # and the player's discard, see set_busy
 STAGES = ("transcribe", "cleanup", "entities", "tags")
 POLL_MS = 50  # how often the UI thread looks for work posted by other threads
@@ -154,6 +155,7 @@ class App:
         for pane in (self.left, self.right):
             pane.frame.rowconfigure(0, minsize=self.commit_button.winfo_reqheight() + 3)
         self.player.set_volume(int(self.config["window"]["volume"]))
+        self.player.set_output_device(self.config["playback"]["output_device"])
         self.keylog = KeyLog(root)
         self.keylog.watch(self.left.text, "transcript")
         self.keylog.watch(self.right.text, "note")
@@ -295,7 +297,7 @@ class App:
         # Packed last, so it takes whatever width the title and icons leave. Its
         # buttons log what they did themselves, with the position and the memo.
         discard = self._clicked("discard", self.discard)
-        self.player = PlayerBar(top, ICONS, discard, lambda text: self.set_status(text, "error"), "Icon")
+        self.player = PlayerBar(top, ICONS, discard, self.set_status, "Icon")
         self.player.frame.pack(side="left", fill="x", expand=True, padx=(16, 12))
         self.tooltips["play"] = Tooltip(self.player.play_button, "Play / pause")
         self.tooltips["volume"] = Tooltip(self.player.volume_label, "Volume")
@@ -410,9 +412,28 @@ class App:
         if self.settings_dialog is not None and self.settings_dialog.window.winfo_exists():
             self.settings_dialog.window.lift()
             return
+        self.rescan_audio()  # so a headset plugged in since launch is on the list; skipped while recording
         self.settings_dialog = SettingsDialog(
-            self.root, config.values(self.config), self.keylog, self.apply_settings, self.config_path
+            self.root, config.values(self.config), self.keylog, self.apply_settings, self.config_path,
+            on_rescan=self.rescan_audio,
         )
+
+    def rescan_audio(self) -> str:
+        """Have PortAudio look for devices again. Returns why it couldn't, or blank.
+
+        PortAudio can't rescan with a stream open, so playback pauses first,
+        and nothing happens while recording.
+        """
+        if self.recording:
+            return "Stop recording to rescan"
+        self.player.pause()
+        try:
+            capture.rescan_devices()
+        except Exception as e:  # no sounddevice, or PortAudio itself failing
+            log.warning("couldn't rescan audio devices: %s: %s", type(e).__name__, e)
+            return "Couldn't rescan audio devices, see log"
+        log.info("audio devices rescanned")
+        return ""
 
     def apply_settings(self, values: dict[Field, str]) -> None:
         """Write the dialog's values into the .cfg, log what changed (secrets by name only), apply."""
@@ -438,12 +459,15 @@ class App:
 
         Each memo builds its backends from ``self.config`` when it runs, so
         model and provider changes need nothing here. What does: anything held
-        between memos. Today that is the log level and the hotkey listener;
-        the cached Whisper model joins in step 7.
+        between memos. Today that is the log level, the hotkey listener and
+        the player's output device; the cached Whisper model joins in step 7.
+        The microphone is picked up by the next recording.
         """
         if ("logging", "level") in changed:
             logsetup.set_level(self.config["logging"]["level"])
             log.info("log level now %s", self.config["logging"]["level"].upper())
+        if OUTPUT_DEVICE in changed:
+            self.player.set_output_device(self.config["playback"]["output_device"])
         if changed & HOTKEY_FIELDS:
             self.hotkeys.bind(self.config["capture"]["hotkey"], self.config["capture"]["note_hotkey"])
 
@@ -492,7 +516,10 @@ class App:
         self.player.set_enabled(False)
         self.buttons["record"].configure(text=ICONS["stop"])
         self.tooltips["record"].text = "Stop"
-        self.set_status("Recording…")
+        if self.recorder.note:
+            self.set_status(f"Recording… {self.recorder.note}", "warning")
+        else:
+            self.set_status("Recording…")
 
     def stop_recording(self) -> None:
         self.recording = False
