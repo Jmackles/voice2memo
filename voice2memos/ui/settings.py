@@ -18,6 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, ttk
 
+from voice2memos import config
 from voice2memos.config import SECRET_FIELDS, Field
 from voice2memos.ui.panes import KeyLog, replace_text
 
@@ -108,9 +109,11 @@ class SettingsDialog:
         values: dict[Field, str],
         keylog: KeyLog,
         on_save: Callable[[dict[Field, str]], None],
+        config_path: Path | None = None,
     ) -> None:
         self.keylog = keylog
         self.on_save = on_save
+        self.config_path = config_path or config.CONFIG_PATH  # relative folders are relative to its folder
         self.vars: dict[Field, tk.Variable] = {}
         self.texts: dict[Field, tk.Text] = {}
         self.widgets: dict[Field, tk.Widget] = {}
@@ -149,6 +152,9 @@ class SettingsDialog:
         self._entry(folders, ("vault", "path"), "Obsidian vault", browse=True)
         self._entry(folders, ("capture", "save_dir"), "Recordings", browse=True)
         self._entry(folders, ("capture", "trash_dir"), "Trash", browse=True)
+        ttk.Label(folders, text="Blank trash keeps it inside the recordings folder. ~ is your home folder.").grid(
+            column=0, columnspan=3, sticky="w", pady=(4, 0)
+        )
         whisper = self._group(tab, "Transcription")
         self._choice(whisper, ("whisper", "model_size"), "Whisper model", WHISPER_SIZES)
         self._choice(whisper, ("whisper", "device"), "Device", DEVICES)
@@ -263,7 +269,10 @@ class SettingsDialog:
     # --- behavior ---------------------------------------------------------
 
     def _browse(self, var: tk.StringVar) -> None:
-        folder = filedialog.askdirectory(parent=self.window, initialdir=var.get() or None)
+        # Start where the field points, which for "~/..." or a relative folder isn't the text itself.
+        current = var.get().strip()
+        initial = config.resolve_folder(current, self.config_path) if current else None
+        folder = filedialog.askdirectory(parent=self.window, initialdir=initial)
         if folder:
             var.set(folder)
 
@@ -316,6 +325,7 @@ class SettingsDialog:
         values = self.values()
         if values[HOTKEY] and values[HOTKEY] == values[NOTE_HOTKEY]:
             self.error.configure(text="Push to talk and push to note need different keys.")
+            log.info("settings not saved: both hotkeys are %s", values[HOTKEY])
             return
         self.close()
         self.on_save(values)
