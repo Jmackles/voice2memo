@@ -60,6 +60,11 @@ DEFAULTS: dict[str, dict[str, str]] = {
         "timeout": "60",
         "keep_alive": "30m",
         "prompt": "",
+        # Example pairs in the prompt's own "Example input: / Example output:" form,
+        # sent after the prompt. With learn_from_edits on, saving a Note the user
+        # edited by hand adds its paragraphs here.
+        "examples": "",
+        "learn_from_edits": "false",
     },
     "entities": {
         "provider": "ollama",
@@ -75,7 +80,7 @@ DEFAULTS: dict[str, dict[str, str]] = {
     "keys": {"openai": "", "anthropic": ""},
     "logging": {"level": "INFO"},
     "playback": {"output_device": ""},
-    "window": {"geometry": "960x600", "sash": "", "volume": "100"},
+    "window": {"geometry": "960x600", "sash": "", "volume": "100", "preview": "true"},
     # The fake backends: model_size = fake and provider = fake answer from this fixture.
     "fake": {"fixture": "", "fail": "", "delay": "0"},
 }
@@ -113,12 +118,14 @@ CHECKS: dict[Field, tuple[Callable[[str], bool], str]] = {
     ("cleanup", "temperature"): (_number(0, 1), "a number from 0 to 1"),
     ("entities", "temperature"): (_number(0, 1), "a number from 0 to 1"),
     ("cleanup", "timeout"): (_number(1), "a number of seconds"),
+    ("cleanup", "learn_from_edits"): (lambda v: v in ("true", "false"), "true or false"),
     ("entities", "timeout"): (_number(1), "a number of seconds"),
     ("note", "paragraph_seconds"): (_number(0), "a number of seconds, 0 for Whisper's own segments"),
     ("logging", "level"): (lambda v: v.upper() in LOG_LEVELS, ", ".join(LOG_LEVELS)),
     ("window", "geometry"): (lambda v: re.fullmatch(r"\d+x\d+", v) is not None, "width x height, like 960x600"),
     ("window", "sash"): (lambda v: v == "" or v.isdigit(), "blank or a number of pixels"),
     ("window", "volume"): (lambda v: v.isdigit() and int(v) <= 100, "a whole number from 0 to 100"),
+    ("window", "preview"): (lambda v: v.lower() in ("true", "false"), "true or false"),
     ("fake", "fail"): (lambda v: set(v.split()) <= set(STAGES), "blank or stage names: " + ", ".join(STAGES)),
     ("fake", "delay"): (_number(0), "a number of seconds"),
 }

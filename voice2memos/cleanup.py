@@ -314,6 +314,49 @@ def available_models(provider: str, key: str = "", timeout: float = 5) -> tuple[
 # --- stages -----------------------------------------------------------------
 
 
+def rewrite_prompt(cfg) -> str:
+    """The rewrite prompt the config asks for (or prompts/rewrite.txt), with the user's own examples after it."""
+    prompt = cfg["cleanup"]["prompt"].strip() or load_prompt("rewrite")
+    examples = cfg["cleanup"]["examples"].strip()
+    return f"{prompt}\n\n{examples}" if examples else prompt
+
+
+def format_example(spoken: str, written: str) -> str:
+    """One pair in the form the shipped prompt uses."""
+    return f"Example input:\n{spoken}\nExample output:\n{written}"
+
+
+WIKILINK = re.compile(r"\[\[([^\]|]*)(?:\|([^\]]*))?\]\]")
+
+
+def learned_examples(segments: list[Segment], note_text: str) -> list[str]:
+    """Example pairs from a Note the user edited by hand.
+
+    Each paragraph that differs from what the model wrote (and from the raw
+    words) is paired with the words it was spoken as. Link brackets go, and
+    each side is one line, like the shipped examples. Nothing when the
+    paragraphs don't pair up with the segments.
+    """
+    paragraphs = [p for p in re.split(r"\n\s*\n", note_text) if p.strip()]
+    if len(paragraphs) != len(segments):
+        return []
+    examples = []
+    for segment, paragraph in zip(segments, paragraphs):
+        written = " ".join(WIKILINK.sub(lambda m: m.group(2) or m.group(1), paragraph).split())
+        spoken = " ".join(segment.text.split())
+        if written and written not in (" ".join(segment.shown.split()), spoken):
+            examples.append(format_example(spoken, written))
+    return examples
+
+
+def add_examples(existing: str, new: list[str]) -> tuple[str, int]:
+    """``existing`` with the pairs it doesn't already hold appended; how many that was."""
+    added = [example for example in new if example not in existing]
+    if not added:
+        return existing, 0
+    return "\n\n".join(filter(None, [existing.strip(), *added])), len(added)
+
+
 def rewrite(provider: Provider, segments: list[Segment], prompt: str, timeout: float, stem: str) -> list[str]:
     """Fill each segment's ``cleaned`` text, one call per segment so timestamps survive.
 

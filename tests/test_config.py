@@ -61,6 +61,13 @@ def test_the_multi_line_prompt_round_trips(path):
     assert config.load(path)[0]["cleanup"]["prompt"] == PROMPT
 
 
+def test_examples_with_blank_lines_between_pairs_round_trip(path):
+    examples = "Example input:\num hi\nExample output:\nHi.\n\nExample input:\nso bye\nExample output:\nBye."
+    config.update_file(path, {("cleanup", "examples"): examples})
+    cfg, warnings = config.load(path)
+    assert warnings == [] and cfg["cleanup"]["examples"] == examples
+
+
 def test_comments_at_the_left_edge_are_ignored(path):
     path.write_text(
         "﻿# A comment, after the byte-order mark Notepad adds\n"

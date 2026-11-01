@@ -44,6 +44,7 @@ PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 HOTKEY = ("capture", "hotkey")
 NOTE_HOTKEY = ("capture", "note_hotkey")
 PROMPT = ("cleanup", "prompt")
+EXAMPLES = ("cleanup", "examples")
 INPUT_DEVICE = ("capture", "input_device")
 OUTPUT_DEVICE = ("playback", "output_device")
 DEVICE_KINDS = {INPUT_DEVICE: "input", OUTPUT_DEVICE: "output"}
@@ -217,6 +218,11 @@ class SettingsDialog:
         self._note(paragraphs).configure(
             text="Seconds of speech per paragraph at most; a pause breaks one sooner. 0 keeps Whisper's own sentences."
         )
+        self._check(paragraphs, ("cleanup", "learn_from_edits"), "Learn from my edits")
+        self._note(paragraphs).configure(
+            text="Saving a Note you edited by hand adds each changed paragraph, with the words it was spoken as, "
+            "to the cleanup examples under Prompt."
+        )
         return tab
 
     def _audio_tab(self, notebook: ttk.Notebook) -> ttk.Frame:
@@ -269,8 +275,15 @@ class SettingsDialog:
         ttk.Label(tab, text="Rewrite prompt and its examples. Blank or unchanged uses prompts/rewrite.txt.").pack(
             anchor="w"
         )
-        self._text(tab, PROMPT, height=16).pack(fill="both", expand=True, pady=(4, 6))
+        self._text(tab, PROMPT, height=12).pack(fill="both", expand=True, pady=(4, 6))
         ttk.Button(tab, text="Reset to default", command=self.reset_prompt).pack(anchor="e")
+        ttk.Label(
+            tab,
+            text="Your own examples, sent after the prompt in the same form. "
+            "Learn from my edits (General) adds to them; edit or delete them freely.",
+            wraplength=560,
+        ).pack(anchor="w", pady=(8, 0))
+        self._text(tab, EXAMPLES, height=8).pack(fill="both", expand=True, pady=(4, 0))
         return tab
 
     def _words_tab(self, notebook: ttk.Notebook) -> ttk.Frame:
@@ -321,6 +334,14 @@ class SettingsDialog:
         self.widgets[field] = combo
         if editable:
             self._watch(combo, field)
+
+    def _check(self, group: ttk.Frame, field: Field, label: str) -> None:
+        """A yes/no field, "true" or "false" in the .cfg."""
+        row = group.grid_size()[1]
+        var = self.vars[field] = tk.StringVar()
+        check = ttk.Checkbutton(group, text=label, variable=var, onvalue="true", offvalue="false")
+        check.grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
+        self.widgets[field] = check
 
     def _note(self, group: ttk.Frame) -> ttk.Label:
         """A line of small print under the field above it, in the second column."""

@@ -93,7 +93,7 @@ def run_transcribe(cfg, wav: Path, fake: bool) -> int:
 def run_clean(cfg, segments_path: Path, fake: bool) -> int:
     print(f"== clean {segments_path}")
     provider = cleanup.FakeProvider(segments_path.parent) if fake else cleanup.make_provider(cfg, "cleanup", REPO)
-    prompt = cfg["cleanup"]["prompt"].strip() or cleanup.load_prompt("rewrite")
+    prompt = cleanup.rewrite_prompt(cfg)
     try:
         segments = transcribe.load_segments(segments_path)
     except VoiceMemoError as e:

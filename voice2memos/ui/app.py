@@ -29,6 +29,7 @@ from voice2memos import __version__, capture, cleanup, config, logsetup, note, t
 from voice2memos.config import Field
 from voice2memos.errors import StageResult, VoiceMemoError
 from voice2memos.note import Memo
+from voice2memos.ui.footer import Footer
 from voice2memos.ui.panes import KeyLog, make_pane, replace_text
 from voice2memos.ui.platform import set_dpi_awareness
 from voice2memos.ui.player import PlayerBar
@@ -67,8 +68,11 @@ ICONS = {
     "pause": "⏸",
     "volume": "🔈",
     "discard": "🗑",
-    "commit": "+",
+    "commit": "✨",
 }
+
+CLEAN_UP_TIP = "Clean up: rewrite the Note from the Transcript again, with links and tags"
+CLEAN_UP_EDITED_TIP = "Clean up this edited Transcript into the Note, as if just transcribed"
 
 # Banner buttons left to right: handler name and tooltip. Discard lives in
 # the player, beside the recording it throws away.
@@ -146,6 +150,7 @@ class App:
         root.report_callback_exception = self._callback_exception
         self._make_fonts_and_styles()
         self._build_banner()
+        self._build_footer()  # packed at the bottom before the panes take the rest
         self._build_panes()
         # No narrower than the banner, or the player or an icon gets cut off.
         # Measured with the discard button showing, as it does for a recording.
@@ -298,7 +303,10 @@ class App:
         self.root.destroy()
 
     def _remember_window(self) -> None:
-        window = {("window", "volume"): str(self.player.volume_percent)}
+        window = {
+            ("window", "volume"): str(self.player.volume_percent),
+            ("window", "preview"): "true" if self.footer.shown else "false",
+        }
         if self.root.winfo_ismapped():  # a hidden window has no size worth keeping
             window[("window", "sash")] = str(self.panes.sashpos(0))
             if self.root.state() != "zoomed":  # keep the normal size, not the maximized one
@@ -325,6 +333,9 @@ class App:
         self.pane_font.configure(size=11)
         self.pane_title_font = base.copy()
         self.pane_title_font.configure(weight="bold")
+        self.chip_font = base.copy()
+        self.preview_font = tkfont.nametofont("TkFixedFont").copy()
+        self.preview_font.configure(size=9)
 
         style = ttk.Style(self.root)
         style.configure("Title.TLabel", font=self.title_font)
@@ -391,12 +402,49 @@ class App:
         self.left_background = self.left.text.cget("background")
         self.tooltips["lock"] = Tooltip(self.left.toggle, "Unlock to edit the Transcript")
         self.tooltips["paint"] = Tooltip(self.right.toggle, "Paint mode: click words to link them")
-        # Shown only while the Transcript holds edits the Note hasn't been rebuilt from.
+        # Clean up: the second half of the pipeline on whatever the Transcript holds. Shown
+        # once there is a Transcript; its tooltip says whether that Transcript was edited.
         self.commit_button = ttk.Button(
             self.left.header, text=ICONS["commit"], style="Toggle.TButton",
             command=self._clicked("commit", self.commit_transcript),
         )
-        self.tooltips["commit"] = Tooltip(self.commit_button, "Clean up the Note from this Transcript, as if just transcribed")
+        self.tooltips["commit"] = Tooltip(self.commit_button, CLEAN_UP_TIP)
+
+    def _build_footer(self) -> None:
+        """Under the panes: the tag chips and the note preview, the note as Save would write it."""
+        self.footer = Footer(
+            self.root, self.chip_font, self.preview_font, self._tag_toggled, self._clicked("preview", self.toggle_preview)
+        )
+        self.footer.frame.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
+        self.footer.set_shown(self.config["window"]["preview"].lower() == "true")
+
+    def toggle_preview(self) -> None:
+        self.footer.set_shown(not self.footer.shown)
+        log.info("note preview %s", "shown" if self.footer.shown else "folded")
+
+    def _refresh_preview(self) -> None:
+        """The preview is the serializer on the Note pane, so what it shows is what Save writes."""
+        if self.memo is None:
+            self.footer.show_preview("")
+        else:
+            self.footer.show_preview(note.render(self.memo, self.right.text.get("1.0", "end-1c")))
+
+    def _tag_toggled(self, tag: str, struck: bool) -> None:
+        """A chip click: the tag leaves or rejoins the frontmatter; remembered in the memo folder."""
+        if self.memo is None:
+            return
+        memo = self.memo
+        rejected = [t for t in memo.rejected_tags if t != tag]
+        memo.rejected_tags = rejected + [tag] if struck else rejected
+        try:
+            memo.save_tags()
+        except OSError as e:
+            log.warning("%s: couldn't save the tag decision: %s", memo.stem, e)
+        log.info("%s: tag %s %s", memo.stem, tag, "struck" if struck else "kept")
+        if not self.dirty:
+            self.dirty = True
+            self._update_title()
+        self._refresh_preview()
 
     # --- status line -----------------------------------------------------
 
@@ -645,6 +693,8 @@ class App:
             self._fill("", "")
             self.dirty = False
             self._update_title()
+        if "tags" in STAGES[STAGES.index(start):]:
+            self.footer.chips.clear()  # new proposals are on their way
         self.set_status("Transcribing…" if start == "transcribe" else f"Running {start}…")
         cfg = config.new_parser()
         cfg.read_dict({s: dict(self.config[s]) for s in self.config.sections()})  # the worker gets its own copy
@@ -678,7 +728,7 @@ class App:
                     return  # nothing downstream without a transcript
             text = memo.raw_text
             if "cleanup" in stages:
-                prompt = cfg["cleanup"]["prompt"].strip() or cleanup.load_prompt("rewrite")
+                prompt = cleanup.rewrite_prompt(cfg)
                 try:
                     provider = cleanup.make_provider(cfg, "cleanup", config.APP_DIR)
                     warnings = cleanup.rewrite(provider, memo.segments, prompt, float(cfg["cleanup"]["timeout"]), stem)
@@ -729,7 +779,10 @@ class App:
             self._fill(memo.raw_text, memo.cleaned_text)
         elif result.stage == "cleanup":
             self._fill(None, memo.cleaned_text)
+        elif result.stage == "tags" and result.ok:
+            self.footer.chips.show(memo.tags, memo.rejected_tags)
         if result.ok:
+            self._refresh_preview()  # every stage changes what Save would write
             log.info("%s: %s shown", memo.stem, result.stage)
             if result.message:
                 self.run_issue = True
@@ -760,6 +813,7 @@ class App:
         finally:
             self.filling = False
         self._update_commit()
+        self._refresh_preview()
 
     def set_busy(self, busy: bool) -> None:
         self.busy = busy
@@ -795,6 +849,7 @@ class App:
         if not self.dirty:
             self.dirty = True
             self._update_title()
+        self._refresh_preview()
 
     def _transcript_modified(self, _event: tk.Event | None = None) -> None:
         if not self.left.text.edit_modified():
@@ -839,24 +894,30 @@ class App:
         self.right.text.yview_moveto(top)
 
     def _update_commit(self) -> None:
-        """Show + while there are Transcript edits to clean up; hide it once there aren't."""
-        if self.transcript_edited():
-            if not self.commit_button.winfo_manager():
-                self.commit_button.pack(side="right")
-                log.info("transcript edited; the note follows it, + cleans it up")
-        elif self.commit_button.winfo_manager():
-            self.commit_button.pack_forget()
+        """Show Clean up while there is a Transcript; its tooltip says whether that Transcript was edited."""
+        edited = self.transcript_edited()
+        if not self.left.text.get("1.0", "end-1c").strip():
+            if self.commit_button.winfo_manager():
+                self.commit_button.pack_forget()
+            return
+        if not self.commit_button.winfo_manager():
+            self.commit_button.pack(side="right")
+        if edited and self.tooltips["commit"].text != CLEAN_UP_EDITED_TIP:
+            log.info("transcript edited; the note follows it until it's cleaned up")
+        self.tooltips["commit"].text = CLEAN_UP_EDITED_TIP if edited else CLEAN_UP_TIP
 
     def commit_transcript(self) -> None:
-        """The +: the rest of the pipeline, as if the edited Transcript had just been transcribed.
+        """Clean up: the rest of the pipeline on the Transcript as it stands.
 
-        The Transcript becomes the memo's segments, and cleanup, entities and
-        tags run on them, filling the Note. Saving it stays the Save button's
-        job, as for any memo. The Note is replaced, so if it still holds edits
-        of its own (the user declined to let it follow), it asks first. With
-        no memo yet, the typed text starts one, without audio.
+        An edited Transcript first becomes the memo's segments, Whisper's own
+        set aside; an unchanged one runs again as it is, for a new prompt,
+        model or example to have another go. Either way cleanup, entities and
+        tags run and fill the Note. Saving it stays the Save button's job, as
+        for any memo. The Note is replaced, so if it holds edits of its own it
+        asks first. With no memo yet, the typed text starts one, without audio.
         """
-        if self.busy or not self.transcript_edited():
+        text = self.left.text.get("1.0", "end-1c")
+        if self.busy or not text.strip():
             return
         if self.note_hand_edited and not messagebox.askyesno(
             "voice2memos",
@@ -865,21 +926,23 @@ class App:
         ):
             log.info("transcript not sent; the note's own edits kept")
             return
-        text = self.left.text.get("1.0", "end-1c")
         memo = self.memo
-        try:
-            if memo is None:
-                memo = Memo.create(self.save_dir / capture.new_stem(self.save_dir))
-            memo.keep_original()
-            memo.segments = transcribe.apply_edit(memo.segments, text)
-            memo.save_segments()
-        except OSError as e:
-            log.warning("couldn't save the edited transcript: %s", e)
-            self.set_status(f"Could not save the transcript: {e.strerror or e}", "error")
-            return
-        log.info("%s: transcript edited by hand, %d segment(s); cleaning it up", memo.stem, len(memo.segments))
+        if self.transcript_edited():
+            try:
+                if memo is None:
+                    memo = Memo.create(self.save_dir / capture.new_stem(self.save_dir))
+                memo.keep_original()
+                memo.segments = transcribe.apply_edit(memo.segments, text)
+                memo.save_segments()
+            except OSError as e:
+                log.warning("couldn't save the edited transcript: %s", e)
+                self.set_status(f"Could not save the transcript: {e.strerror or e}", "error")
+                return
+            log.info("%s: transcript edited by hand, %d segment(s); cleaning it up", memo.stem, len(memo.segments))
+        else:
+            log.info("%s: cleaning up again, %d segment(s)", memo.stem, len(memo.segments))
         self.run_pipeline(memo, "cleanup")
-        self._fill(memo.raw_text, memo.raw_text)  # tidied to a paragraph per segment, which hides the +
+        self._fill(memo.raw_text, memo.raw_text)  # tidied to a paragraph per segment, raw until the cleanup lands
 
     def _update_title(self) -> None:
         self.root.title(f"voice2memos {__version__}{' *' if self.dirty else ''}")
@@ -916,7 +979,8 @@ class App:
 
     def _write_note(self, path: Path) -> None:
         memo = self.memo
-        text = note.render(memo, self.right.text.get("1.0", "end-1c"))
+        note_text = self.right.text.get("1.0", "end-1c")
+        text = note.render(memo, note_text)
         try:
             note.write_note(path, text)
             (memo.folder / note.NOTE_FILE).write_text(text, encoding="utf-8")
@@ -931,7 +995,24 @@ class App:
         self.dirty = False
         self._update_title()
         log.info("%s: saved to %s", memo.stem, path)
-        self.set_status(f"Saved {path.name}")
+        learned = self._learn_examples(memo, note_text)
+        self.set_status(f"Saved {path.name}" + (f", {learned} cleanup example(s) learned" if learned else ""))
+
+    def _learn_examples(self, memo: Memo, note_text: str) -> int:
+        """With learn_from_edits on, a hand-edited Note's changed paragraphs join the cleanup examples. How many did."""
+        if self.config["cleanup"]["learn_from_edits"].strip() != "true" or not self.note_hand_edited:
+            return 0
+        examples, added = cleanup.add_examples(self.config["cleanup"]["examples"], cleanup.learned_examples(memo.segments, note_text))
+        if not added:
+            return 0
+        try:
+            self.config, _warnings = config.update_file(self.config_path, {("cleanup", "examples"): examples})
+        except (OSError, UnicodeDecodeError, configparser.Error) as e:
+            log.warning("cleanup examples not saved: %s", config.describe_error(e))
+            return 0
+        log.info("%s: %d cleanup example(s) learned from the edited note", memo.stem, added)
+        log.debug("%s: examples now:\n%s", memo.stem, examples)
+        return added
 
     def discard(self) -> None:
         """The player's 🗑: the recording's working folder, and a saved note with its
@@ -949,6 +1030,7 @@ class App:
             self.player.load(memo.wav, discardable=memo.is_recording)
             self.set_status(e.message, "error")
             return
+        self.footer.chips.clear()
         self._fill("", "")
         self.set_status(f"Discarded {memo.stem}")
 

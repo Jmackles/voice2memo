@@ -97,6 +97,38 @@ def test_the_fake_echoes_without_a_fixture(segments):
     assert [s.cleaned for s in segments] == [s.text.strip() for s in segments]
 
 
+def test_rewrite_prompt_is_the_config_or_the_file_with_the_examples_after():
+    cfg = config.new_parser()
+    assert cleanup.rewrite_prompt(cfg) == cleanup.load_prompt("rewrite")
+    cfg["cleanup"]["examples"] = cleanup.format_example("um hi", "Hi.") + "\n"
+    assert cleanup.rewrite_prompt(cfg) == cleanup.load_prompt("rewrite") + "\n\nExample input:\num hi\nExample output:\nHi."
+    cfg["cleanup"]["prompt"] = " Mine. "
+    assert cleanup.rewrite_prompt(cfg) == "Mine.\n\nExample input:\num hi\nExample output:\nHi."
+
+
+def test_learned_examples_pair_changed_paragraphs_with_their_spoken_words(segments):
+    segments[0].cleaned = "I was thinking about the database thing again."
+    segments[1].cleaned = "Maybe Bookinnit should just have fields instead of tables."
+    note_text = (
+        "I was thinking about the database thing again.\n\n"  # the model's own, not an example
+        "Maybe [[Bookinnit]] should have [[fields|more fields]], not tables.\nSeriously."
+    )
+    assert cleanup.learned_examples(segments, note_text) == [
+        "Example input:\nlike maybe Bookinnit should just have fields instead of tables you know\n"
+        "Example output:\nMaybe Bookinnit should have more fields, not tables. Seriously."
+    ]
+    raw = "\n\n".join(s.text.strip() for s in segments)
+    assert cleanup.learned_examples(segments, raw) == []  # typed back to the raw words: nothing to learn
+    assert cleanup.learned_examples(segments, "One paragraph for two segments.") == []
+
+
+def test_add_examples_skips_pairs_already_there():
+    one, two = cleanup.format_example("a", "A."), cleanup.format_example("b", "B.")
+    assert cleanup.add_examples("", [one]) == (one, 1)
+    assert cleanup.add_examples(one + "\n", [one, two]) == (f"{one}\n\n{two}", 1)
+    assert cleanup.add_examples(one, [one]) == (one, 0)
+
+
 def test_entities_come_sanitized_from_the_fixture(sample):
     assert cleanup.extract_entities(FakeProvider(sample), "text", 30, "x") == ["database", "Bookinnit", "fields", "tables"]
 
