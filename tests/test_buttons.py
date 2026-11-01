@@ -18,7 +18,7 @@ from voice2memos.ui.app import ICONS
 
 from .conftest import FAKE_CFG, FakeOllamaClient, FakeWhisperModel, record_one
 
-EXPECTED_NOTE = "I was thinking about the database thing again.\n\nMaybe Bookinnit should just have fields instead of tables."
+EXPECTED_NOTE = "I was thinking about the [[database]] thing again.\n\nMaybe [[Bookinnit]] should just have [[fields]] instead of [[tables]]."
 EXPECTED_RAW = (
     "um so I was thinking about the uh database thing again\n\nlike maybe Bookinnit should just have fields instead of tables you know"
 )
@@ -52,10 +52,37 @@ def test_buttons_are_disabled_while_the_worker_runs(fake_app, finish):
     assert fake_app.buttons["record"].cget("text") == ICONS["stop"]
     fake_app.buttons["record"].invoke()
     assert fake_app.busy
-    busy = [fake_app.buttons["open_file"], fake_app.buttons["record"], fake_app.player.discard_button]
+    busy = [fake_app.buttons["open_file"], fake_app.buttons["record"], fake_app.buttons["save"], fake_app.player.discard_button]
     assert all(button.instate(["disabled"]) for button in busy)
     finish(fake_app)
     assert not any(button.instate(["disabled"]) for button in busy)
+
+
+def test_saving_mid_pipeline_is_refused_so_no_note_misses_its_links_and_tags(app_factory, finish, monkeypatch, vault):
+    app = app_factory(FAKE_CFG + "delay = 0.5\n")  # continues the [fake] section
+    target = vault / "n.md"
+    monkeypatch.setattr(app_module.filedialog, "asksaveasfilename", lambda **kw: str(target))
+    app.buttons["record"].invoke()
+    app.buttons["record"].invoke()
+    assert app.busy
+    app.save()  # the hotkey path; the button itself is disabled
+    app.save_as()
+    assert app.status_label.cget("text") == "Still working on this memo; save when it's done"
+    assert not target.exists()
+    finish(app)
+    app.buttons["save"].invoke()
+    assert "tags: [idea, bookinnit]" in target.read_text(encoding="utf-8")
+
+
+def test_a_rerun_after_a_save_says_the_saved_note_is_behind(fake_app, finish, monkeypatch, vault):
+    record_one(fake_app, finish)
+    target = vault / "n.md"
+    monkeypatch.setattr(app_module.filedialog, "asksaveasfilename", lambda **kw: str(target))
+    fake_app.buttons["save"].invoke()
+    fake_app.commit_button.invoke()
+    finish(fake_app)
+    assert fake_app.dirty
+    assert fake_app.status_label.cget("text") == "Done; n.md was saved before this, save again to update it"
 
 
 def test_a_dead_microphone_shows_in_the_status_line(app_factory):
@@ -96,8 +123,12 @@ def test_cleanup_failure_shows_raw_text_with_a_retry_that_reruns_only_cleanup(ap
         record_one(app, finish)
     assert app.status_label.cget("text") == "Cleanup failed, showing original"
     assert app.retry_label.winfo_manager() == "pack"
-    assert pane(app, "right") == EXPECTED_RAW  # raw, a paragraph per segment, like the Transcript
-    assert app.memo.entities == ["database", "Bookinnit", "fields", "tables"]  # later stages still ran
+    # Raw words, a paragraph per segment like the Transcript, and the later stages still ran:
+    # the entities they found are linked in the pane, as they will be in the note.
+    assert pane(app, "right") == EXPECTED_RAW.replace("database", "[[database]]").replace("Bookinnit", "[[Bookinnit]]").replace(
+        "fields", "[[fields]]"
+    ).replace("tables", "[[tables]]")
+    assert app.memo.entities == ["database", "Bookinnit", "fields", "tables"]
 
     app.config["fake"]["fail"] = ""
     caplog.clear()
@@ -236,7 +267,7 @@ def test_second_save_of_an_edited_note_writes_in_place_and_a_clean_one_opens_it(
     assert fake_app.dirty and fake_app.root.title().endswith("*")
     monkeypatch.setattr(app_module.filedialog, "asksaveasfilename", lambda **kw: pytest.fail("asked again"))
     fake_app.buttons["save"].invoke()
-    assert "[[tables]]. Extra. ^" in target.read_text(encoding="utf-8")
+    assert "[[tables]]. Extra.\n" in target.read_text(encoding="utf-8")
     assert not fake_app.dirty
 
     opened = []

@@ -7,7 +7,8 @@ import logging
 
 import pytest
 
-from voice2memos import cleanup, config
+from voice2memos import cleanup, config, note
+from voice2memos.ui.panes import replace_text
 from voice2memos.ui import app as app_module
 
 from .conftest import record_one
@@ -100,7 +101,7 @@ def test_plus_rebuilds_the_note_and_keeps_the_transcript_as_written(recorded, fi
         app.commit_button.invoke()
         finish(app)
     # The unchanged paragraph comes back cleaned from the fixture; the fake echoes the edited one.
-    assert pane(app, "right") == f"I was thinking about the database thing again.\n\n{EDITED_SECOND}"
+    assert pane(app, "right") == f"I was thinking about the [[database]] thing again.\n\nmaybe [[Bookinnit]] should have [[fields]] instead of [[tables]]"
     assert pane(app, "left") == f"{first.text.strip()}\n\n{EDITED_SECOND}"
     assert app.tooltips["commit"].text == app_module.CLEAN_UP_TIP  # nothing left to commit
     assert [(s.start, s.end) for s in memo.segments] == [(0.0, 3.2), (3.4, 7.1)]
@@ -112,6 +113,19 @@ def test_plus_rebuilds_the_note_and_keeps_the_transcript_as_written(recorded, fi
     assert "click: commit" in caplog.messages
     assert f"{memo.stem}: transcript edited by hand, 2 segment(s); cleaning it up" in caplog.messages
     assert f"{memo.stem}: transcribe (fake whisper) start" not in caplog.text  # only cleanup onward
+
+
+def test_the_entities_stage_links_the_note_pane_without_undoing_edits(recorded):
+    app = recorded
+    assert pane(app, "right") == EXPECTED_NOTE  # the fake's entities, each linked once
+    replace_text(app.right.text, "The database thing, Bookinnit and [[tables]] as I linked it.")
+    app.root.update()
+    assert app.note_hand_edited and app.dirty
+    app._link_note()  # what the entities stage does when its result lands
+    assert pane(app, "right") == "The [[database]] thing, [[Bookinnit]] and [[tables]] as I linked it."
+    assert app.note_hand_edited  # linking is the program's doing; the edit is still the user's
+    assert app.footer.preview_text() == note.render(app.memo, pane(app, "right"))
+    assert app.footer.preview_text().count("[[tables]]") == 1  # Save links nothing twice
 
 
 def test_editing_the_note_never_touches_the_transcript(recorded):

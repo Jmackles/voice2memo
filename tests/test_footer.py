@@ -69,7 +69,7 @@ def test_typing_in_the_note_updates_the_preview(fake_app, finish):
     record_one(fake_app, finish)
     fake_app.right.text.insert("end", " And more.")
     fake_app.root.update()
-    assert "And more. ^" in fake_app.footer.preview_text()
+    assert "[[tables]]. And more.\n" in fake_app.footer.preview_text()
 
 
 def test_cleaning_up_again_clears_the_chips_until_new_ones_arrive(fake_app, finish):

@@ -22,9 +22,9 @@ Note file layout, written here and nowhere else::
     ---
     # 20261027-093400
 
-    **0:00** <cleaned text, one paragraph per segment, links in [[ ]]> ^stem-0
+    **0:00** <cleaned text, one paragraph per segment, links in [[ ]]>
 
-    **0:31** <the next paragraph> ^stem-1
+    **0:31** <the next paragraph>
 
     ---
 
@@ -35,9 +35,9 @@ Note file layout, written here and nowhere else::
     ![[20261027-093400.wav]]
 
 A segment is a paragraph of speech (see ``transcribe.group_segments``). The
-bold stamp is where it starts in the audio, left out of a typed note. The
-``^stem-N`` block id lets another note embed or link one paragraph; Obsidian
-hides it in reading view.
+bold stamp is where it starts in the audio, left out of a typed note. No block
+ids: an Obsidian ``^id`` can only sit at the end of its paragraph, where it
+reads as clutter, so they wait for the subnotes step that would use them.
 
 The note is written to a temp file beside the target and ``os.replace``d into
 place, so a sync client never sees a half-written file.
@@ -110,6 +110,11 @@ class Memo:
         """What the Note pane shows: one paragraph per segment."""
         return "\n\n".join(s.shown.strip() for s in self.segments)
 
+    @property
+    def linked_text(self) -> str:
+        """The Note pane once the entities are in: the cleaned text with each entity's first mention in [[ ]]."""
+        return "\n\n".join(link_entities(self.cleaned_text.split("\n\n"), self.entities))
+
     @classmethod
     def create(cls, folder: Path, source: Path | None = None) -> Memo:
         folder.mkdir(parents=True, exist_ok=False)
@@ -172,9 +177,8 @@ class Memo:
 def render(memo: Memo, body: str | None = None) -> str:
     """The note as markdown. ``body`` is the note pane's text when the user edited it.
 
-    One paragraph per segment, each stamped with where it starts in the audio
-    and ending in a block id; when the body has as many paragraphs as there
-    are segments they pair up, otherwise the whole body is one paragraph from
+    One paragraph per segment, each stamped with where it starts in the audio;
+    when the body has as many paragraphs as there are segments they pair up, otherwise the whole body is one paragraph from
     the first segment's start. Links wrap the first occurrence of each entity.
     A rule closes the body; the footer under it holds the original words,
     collapsed, and the audio.
@@ -188,7 +192,7 @@ def render(memo: Memo, body: str | None = None) -> str:
         lines.append(f"audio: {memo.stem}.wav")
     lines += [f"tags: [{', '.join(t for t in memo.tags if t not in memo.rejected_tags)}]", "---", f"# {memo.stem}", ""]
     for index, paragraph in enumerate(linked):
-        lines += [f"{_stamp(memo, index)}{paragraph} ^{memo.stem}-{index}", ""]
+        lines += [f"{_stamp(memo, index)}{paragraph}", ""]
     if memo.segments or memo.has_audio:
         lines += ["---", ""]
     if memo.segments:

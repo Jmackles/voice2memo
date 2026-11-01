@@ -770,7 +770,9 @@ class App:
             return  # discarded or replaced while the worker ran
         if result.stage == "done":
             self.set_busy(False)
-            if not self.run_issue:
+            if memo.saved_to is not None and self.dirty:
+                self.set_status(f"Done; {memo.saved_to.name} was saved before this, save again to update it", "warning")
+            elif not self.run_issue:
                 self.set_status("Ready")
             return
         if result.stage == "decode" and result.ok:
@@ -779,6 +781,8 @@ class App:
             self._fill(memo.raw_text, memo.cleaned_text)
         elif result.stage == "cleanup":
             self._fill(None, memo.cleaned_text)
+        elif result.stage == "entities" and result.ok:
+            self._link_note()
         elif result.stage == "tags" and result.ok:
             self.footer.chips.show(memo.tags, memo.rejected_tags)
         if result.ok:
@@ -815,11 +819,31 @@ class App:
         self._update_commit()
         self._refresh_preview()
 
+    def _link_note(self) -> None:
+        """The entities stage: each entity's first mention in the Note gets its [[ ]], so the pane
+        reads as the note will. Edits typed meanwhile and links already there are left alone."""
+        current = self.right.text.get("1.0", "end-1c")
+        linked = "\n\n".join(note.link_entities(current.split("\n\n"), self.memo.entities))
+        if linked == current:
+            return
+        top = self.right.text.yview()[0]
+        self.filling = True  # not a hand edit, so note_hand_edited stays as it was
+        try:
+            replace_text(self.right.text, linked)
+            self.right.text.edit_modified(False)
+        finally:
+            self.filling = False
+        self.right.text.yview_moveto(top)
+        if self.memo.saved_to is not None and not self.dirty:
+            self.dirty = True  # the copy in the vault has no links
+            self._update_title()
+
     def set_busy(self, busy: bool) -> None:
         self.busy = busy
         self._update_capture_buttons()
         self.player.set_busy(busy)
-        self.commit_button.state(["disabled"] if busy else ["!disabled"])
+        for button in (self.commit_button, self.buttons["save"]):
+            button.state(["disabled"] if busy else ["!disabled"])
 
     def _update_capture_buttons(self) -> None:
         """Record and Open are off while a memo runs and while the Whisper model loads."""
@@ -886,7 +910,7 @@ class App:
         if self.transcript_edited():
             text = self.left.text.get("1.0", "end-1c")
         else:
-            text = self.memo.cleaned_text if self.memo is not None else ""
+            text = self.memo.linked_text if self.memo is not None else ""
         if text == self.right.text.get("1.0", "end-1c"):
             return
         top = self.right.text.yview()[0]  # typing far down the Transcript shouldn't scroll the Note to the top
@@ -951,8 +975,7 @@ class App:
 
     def save(self) -> None:
         """Three behaviors: first save asks where; a dirty note writes again; a clean one opens in Obsidian."""
-        if self.memo is None:
-            self.set_status("Nothing to save", "warning")
+        if self._cannot_save():
             return
         if self.memo.saved_to is None:
             self.save_as()
@@ -965,9 +988,18 @@ class App:
                 log.warning("%s: %s", e.message, e.detail)
                 self.set_status(e.message, "error")
 
-    def save_as(self) -> None:
+    def _cannot_save(self) -> bool:
+        """No memo, or one still being worked on: a note saved mid-pipeline is missing what's still to come."""
         if self.memo is None:
             self.set_status("Nothing to save", "warning")
+            return True
+        if self.busy:
+            self.set_status("Still working on this memo; save when it's done", "warning")
+            return True
+        return False
+
+    def save_as(self) -> None:
+        if self._cannot_save():
             return
         initial_dir = self.vault if self.vault is not None and self.vault.exists() else Path.home()
         picked = filedialog.asksaveasfilename(
