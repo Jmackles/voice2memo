@@ -1,0 +1,3 @@
+Name this note in three to six words, the way its speaker would look for it later.
+Use plain words from the note. No date, no quotation marks, no punctuation at the end.
+Return only a JSON object with one key "title" holding the name.

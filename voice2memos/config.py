@@ -76,7 +76,8 @@ DEFAULTS: dict[str, dict[str, str]] = {
     # Speech is grouped into paragraphs of up to this many seconds, broken sooner
     # at a pause; 0 keeps Whisper's own sentence-sized segments.
     "note": {"paragraph_seconds": "30"},
-    "vault": {"path": "", "attachments_subdir": "attachments"},
+    # auto_save: a memo is written into the vault, named by the model, as soon as it's done.
+    "vault": {"path": "", "attachments_subdir": "attachments", "auto_save": "true"},
     "keys": {"openai": "", "anthropic": ""},
     "logging": {"level": "INFO"},
     "playback": {"output_device": ""},
@@ -90,7 +91,7 @@ SECRET_FIELDS: set[Field] = {("keys", "openai"), ("keys", "anthropic")}
 
 PROVIDERS = ("ollama", "openai", "anthropic", "fake")
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
-STAGES = ("capture", "transcribe", "cleanup", "entities", "tags")
+STAGES = ("capture", "transcribe", "cleanup", "entities", "tags", "title")
 
 HEADER = """\
 # voice2memos settings. Edit here or in Settings; a key left out uses its default.
@@ -126,6 +127,7 @@ CHECKS: dict[Field, tuple[Callable[[str], bool], str]] = {
     ("window", "sash"): (lambda v: v == "" or v.isdigit(), "blank or a number of pixels"),
     ("window", "volume"): (lambda v: v.isdigit() and int(v) <= 100, "a whole number from 0 to 100"),
     ("window", "preview"): (lambda v: v.lower() in ("true", "false"), "true or false"),
+    ("vault", "auto_save"): (lambda v: v.lower() in ("true", "false"), "true or false"),
     ("fake", "fail"): (lambda v: set(v.split()) <= set(STAGES), "blank or stage names: " + ", ".join(STAGES)),
     ("fake", "delay"): (_number(0), "a number of seconds"),
 }

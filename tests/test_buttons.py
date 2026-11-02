@@ -35,7 +35,7 @@ def test_record_writes_the_wav_then_fills_both_panes(fake_app, finish, caplog):
     with caplog.at_level(logging.INFO):
         memo = record_one(fake_app, finish)
     assert memo.folder.parent == fake_app.save_dir
-    assert sorted(p.name for p in memo.folder.iterdir()) == ["cleaned.json", "entities.json", "memo.wav", "segments.json", "state.json", "tags.json"]
+    assert sorted(p.name for p in memo.folder.iterdir()) == ["cleaned.json", "entities.json", "memo.wav", "segments.json", "state.json", "tags.json", "title.json"]
     assert pane(fake_app, "left") == EXPECTED_RAW
     assert pane(fake_app, "right") == EXPECTED_NOTE
     assert memo.entities == ["database", "Bookinnit", "fields", "tables"] and memo.tags == ["idea", "bookinnit"]
@@ -157,8 +157,9 @@ def test_the_default_config_runs_cleanup_through_ollama(app_factory, finish):
     record_one(app, finish)
     assert pane(app, "left") == EXPECTED_RAW
     assert pane(app, "right") == EXPECTED_RAW
-    assert [c["model"] for c in FakeOllamaClient.calls] == ["gemma4:e2b"] * 4  # two segments, entities, tags
+    assert [c["model"] for c in FakeOllamaClient.calls] == ["gemma4:e2b"] * 5  # two segments, entities, tags, title
     assert app.memo.entities == [] and app.memo.tags == []  # echoed prompts aren't JSON
+    assert app.memo.title == app.memo.stem  # nor is the title answer, so the note keeps its time stamp name
     assert app.status_label.cget("text") == "Ready"
 
 
@@ -167,7 +168,7 @@ def test_ollama_down_degrades_to_raw_text_with_a_retry(app_factory, finish):
     app = app_factory(OLLAMA_CFG)
     record_one(app, finish)
     assert pane(app, "right") == EXPECTED_RAW
-    assert app.status_label.cget("text") in ("Ollama not running", "Entities failed", "Tags failed")
+    assert app.status_label.cget("text") in ("Ollama not running", "Entities failed", "Tags failed", "Naming failed")
     assert app.retry_callback is not None
 
 
@@ -239,21 +240,36 @@ def test_unreadable_audio_says_so_and_retry_tries_the_decode_again(fake_app, fin
 # --- save ----------------------------------------------------------------------
 
 
-def test_first_save_asks_where_and_renders_the_note_into_the_vault(fake_app, finish, monkeypatch, vault, fixtures_dir):
+def test_with_a_vault_save_names_the_note_and_writes_it_without_asking(fake_app, finish, monkeypatch, vault, fixtures_dir):
     fake_app.config["vault"]["path"] = str(vault)
     memo = record_one(fake_app, finish)
-    asked = []
-    target = vault / f"{memo.stem}.md"
-    monkeypatch.setattr(app_module.filedialog, "asksaveasfilename", lambda **kw: asked.append(kw) or str(target))
+    assert fake_app.footer.name_var.get() == "Bookinnit database fields"  # the model's name
+    assert fake_app.footer.name_hint.cget("text") == "saves as Bookinnit database fields.md"
+    monkeypatch.setattr(app_module.filedialog, "asksaveasfilename", lambda **kw: pytest.fail("asked where"))
     fake_app.buttons["save"].invoke()
-    assert asked[0]["initialdir"] == vault and asked[0]["initialfile"] == f"{memo.stem}.md"
+    target = vault / "Bookinnit database fields.md"
     text = target.read_text(encoding="utf-8")
     expected = (fixtures_dir / "sample" / "expected.md").read_text(encoding="utf-8").replace("sample", memo.stem)
     assert text.splitlines()[2:] == expected.splitlines()[2:]  # all but the date line
     assert (vault / "attachments" / f"{memo.stem}.wav").exists()
     assert (memo.folder / "note.md").read_text(encoding="utf-8") == text
-    assert note.Memo.open(memo.folder).saved_to == target
+    again = note.Memo.open(memo.folder)
+    assert (again.saved_to, again.saved_title) == (target, "Bookinnit database fields")
     assert fake_app.status_label.cget("text") == f"Saved {target.name}"
+    assert fake_app.footer.name_hint.cget("text") == f"saved as {target.name}"
+
+
+def test_without_a_vault_the_first_save_asks_where_offering_the_name(fake_app, finish, monkeypatch, tmp_path):
+    record_one(fake_app, finish)
+    assert fake_app.footer.name_hint.cget("text") == "no vault chosen, so Save asks where"
+    asked = []
+    target = tmp_path / "picked.md"
+    monkeypatch.setattr(app_module.filedialog, "asksaveasfilename", lambda **kw: asked.append(kw) or str(target))
+    fake_app.buttons["save"].invoke()
+    assert asked[0]["initialfile"] == "Bookinnit database fields.md"
+    text = target.read_text(encoding="utf-8")
+    assert '\naliases: ["Bookinnit database fields"]\n' in text  # the file isn't named for it, so Obsidian learns the name
+    assert "\n# Bookinnit database fields\n" in text
 
 
 def test_second_save_of_an_edited_note_writes_in_place_and_a_clean_one_opens_it(fake_app, finish, monkeypatch, vault):

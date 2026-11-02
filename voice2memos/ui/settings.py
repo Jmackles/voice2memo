@@ -204,6 +204,11 @@ class SettingsDialog:
         self._hotkey(keys, NOTE_HOTKEY, "Push to note")
         folders = self._group(tab, "Folders")
         self._entry(folders, ("vault", "path"), "Obsidian vault", browse=True)
+        self._check(folders, ("vault", "auto_save"), "Save each memo into the vault when it's done")
+        self._note(folders).configure(
+            text="Named by the model. A name the vault already has gets the date and time after it, "
+            "with links to the notes of that name."
+        )
         self._entry(folders, ("capture", "save_dir"), "Recordings", browse=True)
         self._entry(folders, ("capture", "trash_dir"), "Trash", browse=True)
         ttk.Label(folders, text="Blank trash keeps it inside the recordings folder. ~ is your home folder.").grid(

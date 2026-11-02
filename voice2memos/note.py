@@ -10,8 +10,9 @@ is the app's source of truth; the vault only ever receives a rendered copy::
       cleaned.json      the same segments with cleaned text
       entities.json     link terms
       tags.json         proposed and rejected tags
+      title.json        the model's name for the note, and the user's if they typed one
       note.md           draft rendered from the above, regenerated on save
-      state.json        saved_to path if saved, created time, source file if opened
+      state.json        saved_to path and the name saved under, created time, source file if opened
 
 Note file layout, written here and nowhere else::
 
@@ -19,14 +20,17 @@ Note file layout, written here and nowhere else::
     date: 2026-10-27T09:34:00-04:00
     audio: 20261027-093400.wav
     tags: [idea, database]
+    aliases: ["Database thoughts"]        only when the file name isn't the title
     ---
-    # 20261027-093400
+    # Database thoughts
 
     **0:00** <cleaned text, one paragraph per segment, links in [[ ]]>
 
     **0:31** <the next paragraph>
 
     ---
+
+    See also: [[Database thoughts]]            only when other notes have this name
 
     > [!quote]- Original
     > **0:00** <raw transcript, one callout line per segment>
@@ -38,6 +42,15 @@ A segment is a paragraph of speech (see ``transcribe.group_segments``). The
 bold stamp is where it starts in the audio, left out of a typed note. No block
 ids: an Obsidian ``^id`` can only sit at the end of its paragraph, where it
 reads as clutter, so they wait for the subnotes step that would use them.
+
+The note is named for its title (``Memo.title``: the user's, else the name it
+was saved under, else the model's, else the stem). ``place`` picks the file:
+the bare title when no note in the vault has that name, otherwise the title
+with the memo's date and time after it. Obsidian resolves links by file name
+across the whole vault, so the check is vault-wide. Such a note also carries
+the bare title as an alias, which Obsidian's quick switcher and link
+suggestions match, and a See also line linking the notes of that name. The
+older notes then list it in their backlinks without the app touching them.
 
 The note is written to a temp file beside the target and ``os.replace``d into
 place, so a sync client never sees a half-written file.
@@ -59,7 +72,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from voice2memos.capture import WAV_NAME
-from voice2memos.cleanup import CLEANED_FILE, ENTITIES_FILE, TAGS_FILE
+from voice2memos.cleanup import CLEANED_FILE, ENTITIES_FILE, TAGS_FILE, TITLE_FILE, sanitize_title
 from voice2memos.errors import SaveError
 from voice2memos.transcribe import SEGMENTS_FILE, Segment, display_text, format_time, load_segments, save_segments
 
@@ -69,6 +82,8 @@ NOTE_FILE = "note.md"
 STATE_FILE = "state.json"
 ORIGINAL_SEGMENTS_FILE = "segments.original.json"
 TRASH_DAYS = 30
+NAME_STAMP = "%Y-%m-%d %H%M"  # after a title the vault already has: "Groceries 2026-11-01 1443"
+STAMPED = r"( \d{4}-\d{2}-\d{2} \d{4}(-\d{2})?)?"
 
 
 @dataclass
@@ -80,7 +95,10 @@ class Memo:
     entities: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     rejected_tags: list[str] = field(default_factory=list)
+    proposed_title: str = ""  # the title stage's
+    chosen_title: str = ""  # typed into the Name field; wins over everything
     saved_to: Path | None = None
+    saved_title: str = ""  # the title saved_to was written under
     created: datetime = field(default_factory=lambda: datetime.now().astimezone())
     source: Path | None = None  # the file it was opened from; None for a recording
 
@@ -115,6 +133,20 @@ class Memo:
         """The Note pane once the entities are in: the cleaned text with each entity's first mention in [[ ]]."""
         return "\n\n".join(link_entities(self.cleaned_text.split("\n\n"), self.entities))
 
+    @property
+    def title(self) -> str:
+        """The note's name: the user's, else what it was saved as, else the model's, else the stem.
+
+        A saved note keeps its name through a Clean up rerun, so the vault file isn't
+        renamed behind the user's back; only typing a new one renames it. A note saved
+        under the stem, because naming hadn't worked, takes the model's name when it comes."""
+        saved = self.saved_title if self.saved_to is not None and self.saved_title != self.stem else ""
+        for candidate in (self.chosen_title, saved, self.proposed_title):
+            name = sanitize_title(candidate)
+            if name:
+                return name
+        return self.stem
+
     @classmethod
     def create(cls, folder: Path, source: Path | None = None) -> Memo:
         folder.mkdir(parents=True, exist_ok=False)
@@ -129,6 +161,7 @@ class Memo:
         if (folder / STATE_FILE).exists():
             state = json.loads((folder / STATE_FILE).read_text(encoding="utf-8"))
             memo.saved_to = Path(state["saved_to"]) if state.get("saved_to") else None
+            memo.saved_title = state.get("saved_title") or ""
             memo.source = Path(state["source"]) if state.get("source") else None
             if state.get("created"):
                 memo.created = datetime.fromisoformat(state["created"])
@@ -141,11 +174,15 @@ class Memo:
         if (folder / TAGS_FILE).exists():
             tags = json.loads((folder / TAGS_FILE).read_text(encoding="utf-8"))
             memo.tags, memo.rejected_tags = tags.get("proposed", []), tags.get("rejected", [])
+        if (folder / TITLE_FILE).exists():
+            title = json.loads((folder / TITLE_FILE).read_text(encoding="utf-8"))
+            memo.proposed_title, memo.chosen_title = title.get("proposed", ""), title.get("chosen", "")
         return memo
 
     def save_state(self) -> None:
         state = {
             "saved_to": str(self.saved_to) if self.saved_to else None,
+            "saved_title": self.saved_title,
             "created": self.created.isoformat(),
             "source": str(self.source) if self.source else None,
         }
@@ -166,6 +203,10 @@ class Memo:
     def save_entities(self) -> None:
         (self.folder / ENTITIES_FILE).write_text(json.dumps(self.entities, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
+    def save_title(self) -> None:
+        title = {"proposed": self.proposed_title, "chosen": self.chosen_title}
+        (self.folder / TITLE_FILE).write_text(json.dumps(title, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
     def save_tags(self) -> None:
         tags = {"proposed": self.tags, "rejected": self.rejected_tags}
         (self.folder / TAGS_FILE).write_text(json.dumps(tags, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -174,14 +215,67 @@ class Memo:
 # --- serializer -------------------------------------------------------------
 
 
-def render(memo: Memo, body: str | None = None) -> str:
-    """The note as markdown. ``body`` is the note pane's text when the user edited it.
+@dataclass
+class Placement:
+    """Where a note goes and how it sits among the notes already in the vault."""
+
+    path: Path
+    title: str
+    see_also: list[str] = field(default_factory=list)  # other notes of this title, by file name
+
+    @property
+    def alias(self) -> bool:
+        """The file name isn't the bare title, so the title goes in as an alias."""
+        return self.path.stem != self.title
+
+
+def vault_notes(folder: Path) -> dict[str, str]:
+    """Every note name under ``folder``, casefolded, to its own spelling. Hidden folders
+    (.obsidian, .trash) are skipped; a folder that can't be read gives what was found."""
+    names: dict[str, str] = {}
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in files:
+            if name.lower().endswith(".md"):
+                stem = name[:-3]
+                names.setdefault(stem.casefold(), stem)
+    return names
+
+
+def place(memo: Memo, folder: Path, names: dict[str, str], path: Path | None = None) -> Placement:
+    """Where ``memo`` is saved, given the note names already in the vault.
+
+    ``path`` is a file the user picked; otherwise a saved note stays where it is
+    until its title changes, and a new or renamed one goes into ``folder`` under
+    the bare title, or the title and the memo's date and time when that name is
+    taken. The memo's own file never counts as taken.
+    """
+    title = memo.title
+    own = memo.saved_to.stem.casefold() if memo.saved_to is not None else None
+    others = {k: v for k, v in names.items() if k != own}
+    if path is None and memo.saved_to is not None and memo.saved_title == title:
+        path = memo.saved_to
+    if path is None:
+        path = folder / f"{title}.md"
+        stamp = memo.created.strftime(NAME_STAMP)
+        counter = 0
+        while path.stem.casefold() in others or (path.exists() and path != memo.saved_to):
+            counter += 1
+            path = folder / (f"{title} {stamp}.md" if counter == 1 else f"{title} {stamp}-{counter - 1:02d}.md")
+    same = re.compile(re.escape(title.casefold()) + STAMPED)
+    see_also = sorted(v for k, v in others.items() if same.fullmatch(k) and k != path.stem.casefold())
+    return Placement(path, title, see_also)
+
+
+def render(memo: Memo, body: str | None = None, placement: Placement | None = None) -> str:
+    """The note as markdown. ``body`` is the note pane's text when the user edited it;
+    ``placement`` is where it's going, which decides the alias and the See also line.
 
     One paragraph per segment, each stamped with where it starts in the audio;
     when the body has as many paragraphs as there are segments they pair up, otherwise the whole body is one paragraph from
     the first segment's start. Links wrap the first occurrence of each entity.
-    A rule closes the body; the footer under it holds the original words,
-    collapsed, and the audio.
+    A rule closes the body; the footer under it holds the links to notes of
+    the same name, the original words, collapsed, and the audio.
     """
     paragraphs = [p.strip() for p in (body if body is not None else memo.cleaned_text).split("\n\n") if p.strip()]
     if len(paragraphs) != len(memo.segments):
@@ -190,11 +284,18 @@ def render(memo: Memo, body: str | None = None) -> str:
     lines = ["---", f"date: {memo.created.isoformat(timespec='seconds')}"]
     if memo.has_audio:
         lines.append(f"audio: {memo.stem}.wav")
-    lines += [f"tags: [{', '.join(t for t in memo.tags if t not in memo.rejected_tags)}]", "---", f"# {memo.stem}", ""]
+    lines.append(f"tags: [{', '.join(t for t in memo.tags if t not in memo.rejected_tags)}]")
+    title = placement.title if placement is not None else memo.title
+    if placement is not None and placement.alias:
+        lines.append(f'aliases: ["{title}"]')
+    lines += ["---", f"# {title}", ""]
     for index, paragraph in enumerate(linked):
         lines += [f"{_stamp(memo, index)}{paragraph}", ""]
-    if memo.segments or memo.has_audio:
+    see_also = placement.see_also if placement is not None else []
+    if memo.segments or memo.has_audio or see_also:
         lines += ["---", ""]
+    if see_also:
+        lines += ["See also: " + ", ".join(f"[[{name}]]" for name in see_also), ""]
     if memo.segments:
         lines += ["> [!quote]- Original"] + [f"> {_stamp(memo, s.index)}{s.text.strip()}" for s in memo.segments] + [""]
     if memo.has_audio:
@@ -288,6 +389,16 @@ def write_note(path: Path, text: str) -> None:
         os.replace(temp, path)
     except OSError as e:
         raise SaveError(f"Could not save: {e.strerror or e}", str(path)) from e
+
+
+def remove_old_copy(old: Path, new: Path) -> None:
+    """After a rename the note is at ``new``; ``old`` goes, unless it is the same file
+    (a change of case only, on a file system that ignores case)."""
+    try:
+        if old.exists() and not os.path.samefile(old, new):
+            old.unlink()
+    except OSError as e:
+        raise SaveError(f"Saved as {new.name}, but {old.name} is still there: {e.strerror or e}", str(old)) from e
 
 
 def copy_audio(memo: Memo, vault: Path, attachments_subdir: str) -> Path | None:

@@ -3,7 +3,7 @@ date: 2026-10-28T17:26:00-04:00
 audio: sample.wav
 tags: [idea, bookinnit]
 ---
-# sample
+# Bookinnit database fields
 
 **0:00** I was thinking about the [[database]] thing again.
 

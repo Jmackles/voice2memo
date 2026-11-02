@@ -37,11 +37,16 @@ PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 CLEANED_FILE = "cleaned.json"
 ENTITIES_FILE = "entities.json"
 TAGS_FILE = "tags.json"
+TITLE_FILE = "title.json"
 
 MAX_GROWTH = 1.5  # cleaned output longer than this times the input is rejected
 MAX_TAGS = 2
 THINK_TAGS = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 LINK_BREAKERS = re.compile(r"[/\\|#^\[\]]")
+# A title becomes a file name and a link target: nothing Windows, macOS or Obsidian rejects.
+TITLE_BREAKERS = re.compile(r'[<>:"/\\|?*#^\[\]\x00-\x1f]')
+MAX_TITLE = 80
+RESERVED_NAMES = {"con", "prn", "aux", "nul"} | {f"{d}{n}" for d in ("com", "lpt") for n in range(1, 10)}
 
 
 def load_prompt(name: str) -> str:
@@ -66,7 +71,8 @@ class FakeProvider(Provider):
     Rewrite prompts get the matching segment's ``cleaned`` text from
     cleaned.json, or the input back unchanged when nothing matches or there is
     no fixture. The entity and tag prompts get entities.json and tags.json as
-    the model would return them. ``fail`` names stages that raise; ``delay``
+    the model would return them, and the title prompt the ``proposed`` name
+    in title.json. ``fail`` names stages that raise; ``delay``
     sleeps, and past ``timeout`` it raises the way a real client would.
     """
 
@@ -79,6 +85,8 @@ class FakeProvider(Provider):
 
     @staticmethod
     def kind(system: str) -> str:
+        if '"title"' in system:
+            return "title"
         if "tags" in system:
             return "tags"
         if "subjects" in system:
@@ -100,6 +108,8 @@ class FakeProvider(Provider):
             return user
         if kind == "entities":
             return json.dumps({"items": self._json(ENTITIES_FILE, [])})
+        if kind == "title":
+            return json.dumps({"title": self._json(TITLE_FILE, {}).get("proposed", "")})
         return json.dumps({"items": self._json(TAGS_FILE, {}).get("proposed", [])})
 
     def _segments(self) -> list[Segment]:
@@ -417,6 +427,33 @@ def choose_tags(provider: Provider, text: str, pool: list[str], timeout: float, 
         elif tag not in chosen:
             chosen.append(tag)
     return chosen[:MAX_TAGS]
+
+
+def suggest_title(provider: Provider, text: str, timeout: float, stem: str) -> str:
+    """A short name for the note, safe as a file name; blank when the model gave nothing usable."""
+    with timed(log, f"title ({provider.name})", stem):
+        answer = _ask_json(provider, load_prompt("title"), text, timeout, stem, EntityError, "Naming failed")
+    try:
+        data = json.loads(answer)
+    except ValueError:
+        log.warning("%s: model answer was not JSON", stem)
+        log.debug("%s: answer was:\n%s", stem, answer)
+        return ""
+    title = data.get("title") if isinstance(data, dict) else data
+    return sanitize_title(title) if isinstance(title, str) else ""
+
+
+def sanitize_title(raw: str) -> str:
+    """``raw`` as a note name: no characters a file system or a wikilink rejects, one line,
+    no leading or trailing dots, at most MAX_TITLE characters cut at a word. Blank when
+    nothing usable is left, or the name is one Windows reserves."""
+    title = " ".join(TITLE_BREAKERS.sub(" ", raw).split()).strip(". ")
+    if len(title) > MAX_TITLE:
+        cut = title[: MAX_TITLE + 1]
+        title = (cut.rsplit(" ", 1)[0] if " " in cut else cut[:MAX_TITLE]).rstrip(". ")
+    if title.split(".")[0].strip().casefold() in RESERVED_NAMES:
+        return ""
+    return title
 
 
 def _ask_json(provider, system, user, timeout, stem, error, message) -> str:

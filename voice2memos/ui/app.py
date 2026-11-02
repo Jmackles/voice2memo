@@ -41,7 +41,7 @@ AUDIO_TYPES = [("Audio", "*.wav *.mp3 *.m4a"), ("WAV", "*.wav"), ("MP3", "*.mp3"
 HOTKEY_FIELDS = {("capture", "hotkey"), ("capture", "note_hotkey")}
 OUTPUT_DEVICE = ("playback", "output_device")
 BUSY_BUTTONS = ("open_file", "record")  # and the player's discard, see set_busy
-STAGES = ("transcribe", "cleanup", "entities", "tags")
+STAGES = ("transcribe", "cleanup", "entities", "tags", "title")
 POLL_MS = 50  # how often the UI thread looks for work posted by other threads
 STARTUP_CHECK_MS = 300  # after the window is up, so a slow answer never holds it back
 MIN_SIZE = (640, 400)  # the design's; the width grows to whatever the banner needs, see __init__
@@ -139,6 +139,8 @@ class App:
         self.note_hand_edited = False  # the user typed in the Note since the program last filled it
         self.mirror_declined = False  # the user kept those edits rather than let the Note follow the Transcript
         self.note_built_from = ""  # the Transcript text the Note's cleanup ran (or is running) on
+        self.vault_names: dict[str, str] = {}  # note names in the vault, for picking a free file name
+        self.names_scanned: Path | None = None  # the folder vault_names came from; None rescans
         self.filling = False  # the program is writing a pane, not the user
         # Other threads never touch a widget: they put a call here and the UI thread runs it.
         self.posted: queue.Queue[tuple[Callable, tuple]] = queue.Queue()
@@ -166,6 +168,7 @@ class App:
         self.keylog = KeyLog(root)
         self.keylog.watch(self.left.text, "transcript")
         self.keylog.watch(self.right.text, "note")
+        self.keylog.watch(self.footer.name_entry, "name")
         self.left.text.bind("<<Modified>>", self._transcript_modified, add="+")
         self.right.text.bind("<<Modified>>", self._note_modified, add="+")
         sash = self.config["window"]["sash"]
@@ -269,6 +272,12 @@ class App:
     def trash_dir(self) -> Path:
         value = self.config["capture"]["trash_dir"].strip()
         return config.resolve_folder(value, self.config_path) if value else self.save_dir / "trash"
+
+    @property
+    def usable_vault(self) -> Path | None:
+        """The vault, if it's set and there; a missing one (an unplugged drive) is never created."""
+        vault = self.vault
+        return vault if vault is not None and vault.is_dir() else None
 
     @property
     def vault(self) -> Path | None:
@@ -411,9 +420,10 @@ class App:
         self.tooltips["commit"] = Tooltip(self.commit_button, CLEAN_UP_TIP)
 
     def _build_footer(self) -> None:
-        """Under the panes: the tag chips and the note preview, the note as Save would write it."""
+        """Under the panes: the note's name, the tag chips and the note preview, the note as Save would write it."""
         self.footer = Footer(
-            self.root, self.chip_font, self.preview_font, self._tag_toggled, self._clicked("preview", self.toggle_preview)
+            self.root, self.chip_font, self.preview_font, self._tag_toggled,
+            self._clicked("preview", self.toggle_preview), self._name_changed,
         )
         self.footer.frame.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
         self.footer.set_shown(self.config["window"]["preview"].lower() == "true")
@@ -423,11 +433,69 @@ class App:
         log.info("note preview %s", "shown" if self.footer.shown else "folded")
 
     def _refresh_preview(self) -> None:
-        """The preview is the serializer on the Note pane, so what it shows is what Save writes."""
+        """The preview is the serializer on the Note pane, so what it shows is what Save writes;
+        the hint by the Name field says which file that is."""
         if self.memo is None:
             self.footer.show_preview("")
+            self.footer.show_name_hint("")
+            return
+        placement = self._placement()
+        self.footer.show_preview(note.render(self.memo, self.right.text.get("1.0", "end-1c"), placement))
+        self.footer.show_name_hint(self._name_hint(placement))
+
+    def _placement(self, fresh: bool = False) -> note.Placement | None:
+        """Where Save puts the note: where it was saved, or into the vault under its name.
+        None when there's nowhere to put it without asking. The vault's note names are
+        scanned once and kept until ``fresh`` or a reason to look again (names_scanned = None)."""
+        memo = self.memo
+        if memo is None:
+            return None
+        vault = self.usable_vault
+        folder = memo.saved_to.parent if memo.saved_to is not None else vault
+        if folder is None:
+            return None
+        scan = vault if vault is not None and folder.is_relative_to(vault) else folder
+        if fresh or self.names_scanned != scan:
+            self.vault_names = note.vault_notes(scan)
+            self.names_scanned = scan
+        return note.place(memo, folder, self.vault_names)
+
+    def _name_hint(self, placement: note.Placement | None) -> str:
+        memo = self.memo
+        if placement is None:
+            return "no vault chosen, so Save asks where"
+        if memo.saved_to is None:
+            hint = f"saves as {placement.path.name}"
+        elif placement.path == memo.saved_to:
+            hint = f"saved as {placement.path.name}"
         else:
-            self.footer.show_preview(note.render(self.memo, self.right.text.get("1.0", "end-1c")))
+            hint = f"Save renames {memo.saved_to.name} to {placement.path.name}"
+        others = len(placement.see_also)
+        if others:
+            hint += f", linked to {others} other note{'s' if others > 1 else ''} of that name"
+        return hint
+
+    def _show_name(self) -> None:
+        """The Name field follows the memo, except once the user has typed a name of their own."""
+        if self.memo is None:
+            self.footer.show_name(None)
+        elif not self.memo.chosen_title:
+            self.footer.show_name(self.memo.title)
+
+    def _name_changed(self, text: str) -> None:
+        """Typed into the Name field: the note is saved, or renamed, under it on the next save."""
+        memo = self.memo
+        if memo is None:
+            return
+        memo.chosen_title = text.strip()
+        try:
+            memo.save_title()
+        except OSError as e:
+            log.warning("%s: name not kept in the memo folder: %s", memo.stem, e)
+        if not self.dirty:
+            self.dirty = True
+            self._update_title()
+        self._refresh_preview()
 
     def _tag_toggled(self, tag: str, struck: bool) -> None:
         """A chip click: the tag leaves or rejoins the frontmatter; remembered in the memo folder."""
@@ -687,6 +755,7 @@ class App:
             else:
                 self.player.clear()  # an opened file still decoding; it loads when that's done
         self.memo = memo
+        self._show_name()
         self.set_busy(True)
         self.run_issue = False  # set when a stage fails or warns, so "done" doesn't say Ready over it
         if start == "transcribe":
@@ -758,6 +827,15 @@ class App:
                 except VoiceMemoError as e:
                     log.warning("%s: %s: %s", stem, e.message, e.detail)
                     post(StageResult("tags", False, e.message))
+            if "title" in stages:
+                try:
+                    provider = cleanup.make_provider(cfg, "entities", config.APP_DIR)
+                    memo.proposed_title = cleanup.suggest_title(provider, text, timeout, stem)
+                    memo.save_title()
+                    post(StageResult("title", True))
+                except VoiceMemoError as e:
+                    log.warning("%s: %s: %s", stem, e.message, e.detail)
+                    post(StageResult("title", False, e.message))
         except Exception:
             log.exception("%s: pipeline crashed", stem)
             post(StageResult("pipeline", False, logsetup.UNEXPECTED))
@@ -770,6 +848,9 @@ class App:
             return  # discarded or replaced while the worker ran
         if result.stage == "done":
             self.set_busy(False)
+            self.names_scanned = None  # notes may have come into the vault while this ran
+            if self._auto_save(memo):
+                return
             if memo.saved_to is not None and self.dirty:
                 self.set_status(f"Done; {memo.saved_to.name} was saved before this, save again to update it", "warning")
             elif not self.run_issue:
@@ -785,6 +866,11 @@ class App:
             self._link_note()
         elif result.stage == "tags" and result.ok:
             self.footer.chips.show(memo.tags, memo.rejected_tags)
+            self._saved_copy_behind()
+        elif result.stage == "title" and result.ok:
+            self._show_name()
+            if memo.title != memo.saved_title:
+                self._saved_copy_behind()  # a note saved under its stem gets its name
         if result.ok:
             self._refresh_preview()  # every stage changes what Save would write
             log.info("%s: %s shown", memo.stem, result.stage)
@@ -819,6 +905,12 @@ class App:
         self._update_commit()
         self._refresh_preview()
 
+    def _saved_copy_behind(self) -> None:
+        """A stage changed what Save writes; a copy already saved no longer matches it."""
+        if self.memo is not None and self.memo.saved_to is not None and not self.dirty:
+            self.dirty = True
+            self._update_title()
+
     def _link_note(self) -> None:
         """The entities stage: each entity's first mention in the Note gets its [[ ]], so the pane
         reads as the note will. Edits typed meanwhile and links already there are left alone."""
@@ -834,9 +926,7 @@ class App:
         finally:
             self.filling = False
         self.right.text.yview_moveto(top)
-        if self.memo.saved_to is not None and not self.dirty:
-            self.dirty = True  # the copy in the vault has no links
-            self._update_title()
+        self._saved_copy_behind()  # the copy in the vault has no links
 
     def set_busy(self, busy: bool) -> None:
         self.busy = busy
@@ -935,9 +1025,9 @@ class App:
 
         An edited Transcript first becomes the memo's segments, Whisper's own
         set aside; an unchanged one runs again as it is, for a new prompt,
-        model or example to have another go. Either way cleanup, entities and
-        tags run and fill the Note. Saving it stays the Save button's job, as
-        for any memo. The Note is replaced, so if it holds edits of its own it
+        model or example to have another go. Either way cleanup, entities,
+        tags and naming run and fill the Note, and it's saved as any memo is:
+        when it's done with auto_save on, else by Save. The Note is replaced, so if it holds edits of its own it
         asks first. With no memo yet, the typed text starts one, without audio.
         """
         text = self.left.text.get("1.0", "end-1c")
@@ -974,19 +1064,42 @@ class App:
     # --- save, discard, vault ---------------------------------------------------
 
     def save(self) -> None:
-        """Three behaviors: first save asks where; a dirty note writes again; a clean one opens in Obsidian."""
+        """A clean saved note opens in Obsidian. Otherwise the note is written: where it was
+        saved, renamed if its name changed, or into the vault under its name the first time.
+        Only with no vault and nowhere saved yet does it ask where."""
         if self._cannot_save():
             return
-        if self.memo.saved_to is None:
-            self.save_as()
-        elif self.dirty:
-            self._write_note(self.memo.saved_to)
-        else:
+        memo = self.memo
+        if memo.saved_to is not None and not self.dirty:
             try:
-                self.set_status(note.open_note(self.memo.saved_to, self.vault is not None and note.is_registered(self.vault)))
+                self.set_status(note.open_note(memo.saved_to, self.vault is not None and note.is_registered(self.vault)))
             except VoiceMemoError as e:
                 log.warning("%s: %s", e.message, e.detail)
                 self.set_status(e.message, "error")
+            return
+        placement = self._placement(fresh=True)
+        if placement is None:
+            self.save_as()
+        else:
+            self._write_note(placement, replaces=memo.saved_to)
+
+    def _auto_save(self, memo: Memo) -> bool:
+        """``[vault] auto_save``: a finished memo goes into the vault with no dialog, under its
+        name, so a memo recorded without looking is in Obsidian by the time anyone looks.
+        A run with a problem still saves (a worse note, never no note) but leaves its
+        status and Retry showing. True when it saved or said why it couldn't."""
+        if self.config["vault"]["auto_save"].strip().lower() != "true":
+            return False
+        if not (memo.segments or memo.has_audio) or (memo.saved_to is not None and not self.dirty):
+            return False
+        placement = self._placement(fresh=True)
+        if placement is None:
+            if self.run_issue:
+                return False
+            self.set_status("Done, not saved: choose your vault and memos save themselves", "warning")
+            return True
+        self._write_note(placement, replaces=memo.saved_to, quiet=self.run_issue)
+        return True
 
     def _cannot_save(self) -> bool:
         """No memo, or one still being worked on: a note saved mid-pipeline is missing what's still to come."""
@@ -1003,32 +1116,54 @@ class App:
             return
         initial_dir = self.vault if self.vault is not None and self.vault.exists() else Path.home()
         picked = filedialog.asksaveasfilename(
-            parent=self.root, title="Save note", initialdir=initial_dir, initialfile=f"{self.memo.stem}.md",
+            parent=self.root, title="Save note", initialdir=initial_dir, initialfile=f"{self.memo.title}.md",
             defaultextension=".md", filetypes=[("Markdown", "*.md")],
         )
-        if picked:
-            self._write_note(Path(picked))
+        if not picked:
+            return
+        path = Path(picked)
+        vault = self.usable_vault
+        scan = vault if vault is not None and path.parent.is_relative_to(vault) else path.parent
+        # A copy under the picked name; the one saved before stays where it is.
+        self._write_note(note.place(self.memo, path.parent, note.vault_notes(scan), path=path))
 
-    def _write_note(self, path: Path) -> None:
+    def _write_note(self, placement: note.Placement, replaces: Path | None = None, quiet: bool = False) -> None:
+        """Render and write the note. ``replaces`` is the file it was saved as, removed once
+        the note is written under a new name. ``quiet`` leaves the status line alone, for a
+        save that shouldn't cover a stage's problem and its Retry."""
         memo = self.memo
+        path = placement.path
         note_text = self.right.text.get("1.0", "end-1c")
-        text = note.render(memo, note_text)
+        text = note.render(memo, note_text, placement)
         try:
             note.write_note(path, text)
             (memo.folder / note.NOTE_FILE).write_text(text, encoding="utf-8")
-            if self.vault is not None:
-                note.copy_audio(memo, self.vault, self.config["vault"]["attachments_subdir"])
+            if self.usable_vault is not None:
+                note.copy_audio(memo, self.usable_vault, self.config["vault"]["attachments_subdir"])
         except VoiceMemoError as e:
             log.warning("%s: %s", e.message, e.detail)
             self.set_status(e.message, "error")
             return  # dirty stays set
-        memo.saved_to = path
+        left_behind = ""
+        if replaces is not None and replaces != path:
+            try:
+                note.remove_old_copy(replaces, path)
+                log.info("%s: renamed %s to %s", memo.stem, replaces.name, path.name)
+            except VoiceMemoError as e:
+                log.warning("%s: %s", e.message, e.detail)
+                left_behind = e.message  # the note itself is saved; say so rather than fail
+        memo.saved_to, memo.saved_title = path, placement.title
         memo.save_state()
         self.dirty = False
         self._update_title()
-        log.info("%s: saved to %s", memo.stem, path)
+        self.names_scanned = None
+        log.info("%s: saved to %s%s", memo.stem, path, f", see also {placement.see_also}" if placement.see_also else "")
         learned = self._learn_examples(memo, note_text)
-        self.set_status(f"Saved {path.name}" + (f", {learned} cleanup example(s) learned" if learned else ""))
+        if left_behind:
+            self.set_status(left_behind, "warning")
+        elif not quiet:
+            self.set_status(f"Saved {path.name}" + (f", {learned} cleanup example(s) learned" if learned else ""))
+        self._refresh_preview()
 
     def _learn_examples(self, memo: Memo, note_text: str) -> int:
         """With learn_from_edits on, a hand-edited Note's changed paragraphs join the cleanup examples. How many did."""
@@ -1063,6 +1198,7 @@ class App:
             self.set_status(e.message, "error")
             return
         self.footer.chips.clear()
+        self._show_name()
         self._fill("", "")
         self.set_status(f"Discarded {memo.stem}")
 
@@ -1076,6 +1212,8 @@ class App:
             self.set_status("Not an Obsidian vault", "warning")
             return
         self._remember(("vault", "path"), str(vault))  # right away, so it survives a crash
+        self.names_scanned = None
+        self._refresh_preview()
         if not note.is_registered(vault):
             self._ask_to_register(vault)
         else:

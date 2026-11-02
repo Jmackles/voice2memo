@@ -279,13 +279,17 @@ def app_factory(tmp_path: Path, monkeypatch):
     """Build the real window, withdrawn, around a config written from ``text``.
 
     The default recordings folder is pinned inside pytest's temp folder, so a
-    test that leaves save_dir out never writes into the real Documents.
+    test that leaves save_dir out never writes into the real Documents, and
+    auto_save defaults to false.
     """
     from voice2memos.ui.app import App
 
     monkeypatch.setitem(config.DEFAULTS["capture"], "save_dir", str(tmp_path / "memos"))
     # And no Whisper warm-up thread unless a test asks for one with model_size = small.
     monkeypatch.setitem(config.DEFAULTS["whisper"], "model_size", "fake")
+    # And no automatic save into the vault unless a test turns it on; tests about other
+    # things would otherwise end on "choose your vault" instead of Ready.
+    monkeypatch.setitem(config.DEFAULTS["vault"], "auto_save", "false")
     apps = []
 
     def make(text: str = "") -> App:

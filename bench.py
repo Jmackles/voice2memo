@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("segments", nargs="?", type=Path)
     p.add_argument("--all", action="store_true", help="run every fixture and show diffs")
 
-    p = sub.add_parser("entities", help="cleaned JSON in, entities + tags out")
+    p = sub.add_parser("entities", help="cleaned JSON in, entities, tags and title out")
     p.add_argument("cleaned", type=Path)
 
     p = sub.add_parser("note", help="fixture folder in, rendered note out")
@@ -133,9 +133,13 @@ def run_entities(cfg, cleaned_path: Path, fake: bool) -> int:
             tags = cleanup.choose_tags(provider, text, pool, timeout, stem)
         except VoiceMemoError as e:
             status, tags = failed(e), []
+        try:
+            title = cleanup.suggest_title(provider, text, timeout, stem)
+        except VoiceMemoError as e:
+            status, title = failed(e), ""
     entities_text = dump(entities)
     tags_text = dump({"proposed": tags, "rejected": []})
-    print(entities_text + tags_text, end="")
+    print(entities_text + tags_text + f"title: {title or '(none, the note keeps its time stamp name)'}")
     return max(status, diff(entities_text, cleaned_path.with_name(cleanup.ENTITIES_FILE)), diff(tags_text, cleaned_path.with_name(cleanup.TAGS_FILE)))
 
 

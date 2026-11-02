@@ -16,6 +16,7 @@ STRUCK_COLOR = "#999999"
 KEPT_COLOR = "#1a1a1a"
 NO_TAGS = "none yet"
 CLICK_HINT = "click one to leave it out"
+TITLE_WIDTH = 5  # characters; the footer's row titles share it so the rows line up
 
 
 class ChipRow:
@@ -25,7 +26,7 @@ class ChipRow:
         self.struck_font = font.copy()
         self.struck_font.configure(overstrike=True)
         self.frame = ttk.Frame(parent)
-        self.title = ttk.Label(self.frame, text="Tags", style="PaneTitle.TLabel")
+        self.title = ttk.Label(self.frame, text="Tags", style="PaneTitle.TLabel", width=TITLE_WIDTH)
         self.title.pack(side="left")
         self.chips: dict[str, ttk.Label] = {}
         self.rejected: set[str] = set()
